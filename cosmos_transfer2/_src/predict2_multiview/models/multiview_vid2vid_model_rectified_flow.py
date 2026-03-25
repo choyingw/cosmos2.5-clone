@@ -57,6 +57,17 @@ class MultiviewVid2VidModelRectifiedFlowConfig(Video2WorldModelRectifiedFlowConf
     view_condition_dropout_max: int = 0
     online_text_embeddings_as_dict: bool = True  # For backward compatibility with old experiments
     conditional_frames_probs: Optional[Dict[int, float]] = None  # Probability distribution for conditional frames
+    # Scheduled self-forcing for train-time conditioning replacement.
+    self_forcing_enabled: bool = False
+    self_forcing_prob: float = 0.0
+    self_forcing_warmup_iter: int = 0
+    self_forcing_ramp_iters: int = 0
+    self_forcing_use_ema_teacher: bool = False
+    # Self-forcing autoregressive rollout options.
+    self_forcing_autoregressive: bool = False
+    self_forcing_chunk_overlap: int = 0  # latent frames per view
+    self_forcing_detach_rollout: bool = True
+    self_forcing_max_rollout_chunks: int = 0  # 0 means use all chunks
 
 
 class MultiviewVid2VidModelRectifiedFlow(Video2WorldModelRectifiedFlow):
@@ -149,9 +160,9 @@ class MultiviewVid2VidModelRectifiedFlow(Video2WorldModelRectifiedFlow):
         if sigma_B_T is not None:
             assert sigma_B_T.ndim == 2, "sigma_B_T should be 2D tensor"
             if sigma_B_T.shape[-1] != 1:
-                assert sigma_B_T.shape[-1] % n_views == 0, (
-                    f"sigma_B_T temporal dimension T must either be 1 or a multiple of sample_n_views. Got T={sigma_B_T.shape[-1]} and sample_n_views={n_views}"
-                )
+                assert (
+                    sigma_B_T.shape[-1] % n_views == 0
+                ), f"sigma_B_T temporal dimension T must either be 1 or a multiple of sample_n_views. Got T={sigma_B_T.shape[-1]} and sample_n_views={n_views}"
                 sigma_B_T = rearrange(sigma_B_T, "B (V T) -> (B V) T", V=n_views).contiguous()
                 reshape_sigma_B_T = True
         x0_B_C_T_H_W, condition, epsilon_B_C_T_H_W, sigma_B_T = super().broadcast_split_for_model_parallelsim(
@@ -286,9 +297,9 @@ class MultiviewVid2VidModelRectifiedFlow(Video2WorldModelRectifiedFlow):
         if parallel_state.is_initialized():
             pass
         else:
-            assert not self.net.is_context_parallel_enabled, (
-                "parallel_state is not initialized, context parallel should be turned off."
-            )
+            assert (
+                not self.net.is_context_parallel_enabled
+            ), "parallel_state is not initialized, context parallel should be turned off."
 
         def velocity_fn(noise: torch.Tensor, noise_x: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
             cond_v = self.denoise(noise, noise_x, timestep, condition)
@@ -383,9 +394,9 @@ def compute_text_embeddings_online_multiview_single_caption(
         input_caption_key=model.input_caption_key,
     )
     assert view0_text_embeddings_B_L_D.shape[0] == 1
-    assert view0_text_embeddings_B_L_D.shape[1] == 512, (
-        f"view0_text_embeddings should be of shape (B, 512, D), got {view0_text_embeddings_B_L_D.shape}"
-    )
+    assert (
+        view0_text_embeddings_B_L_D.shape[1] == 512
+    ), f"view0_text_embeddings should be of shape (B, 512, D), got {view0_text_embeddings_B_L_D.shape}"
     output_text_embeddings = model.empty_string_text_embeddings.clone().repeat(B, n_views, 1)
     output_neg_text_embeddings = model.empty_string_text_embeddings.clone().repeat(B, n_views, 1)
     output_text_embeddings = rearrange(output_text_embeddings, "B (V L) D -> V B L D", V=n_views)
@@ -451,9 +462,7 @@ def compute_text_embeddings_online_multiview_multiple_captions(
         B,
         n_views,
         512,
-    ), (
-        f"output_neg_text_embeddings_B_V_L_D should be of shape (B, n_views, 512, D), got {output_neg_text_embeddings_B_V_L_D.shape}"
-    )
+    ), f"output_neg_text_embeddings_B_V_L_D should be of shape (B, n_views, 512, D), got {output_neg_text_embeddings_B_V_L_D.shape}"
     output_neg_text_embeddings = rearrange(output_neg_text_embeddings_B_V_L_D, "B V L D -> B (V L) D")
 
     dropout_text_embeddings = model.empty_string_text_embeddings.clone().repeat(B, n_views, 1)
@@ -614,6 +623,9 @@ def training_step_multiview(
     # Get the input data to noise and denoise~(image, video) and the corresponding conditioner.
     _, x0_B_C_T_H_W, condition = model.get_data_and_condition(data_batch)
 
+    if _should_use_autoregressive_self_forcing(model, data_batch, condition, x0_B_C_T_H_W):
+        return _training_step_multiview_autoregressive(model, x0_B_C_T_H_W, condition, iteration, data_batch)
+
     # Sample pertubation noise levels and N(0, 1) noises
     epsilon_B_C_T_H_W = torch.randn(x0_B_C_T_H_W.size(), **model.tensor_kwargs_fp32)
     batch_size = x0_B_C_T_H_W.size()[0]
@@ -630,6 +642,18 @@ def training_step_multiview(
     timesteps = rearrange(timesteps, "b -> b 1")
     sigmas = rearrange(sigmas, "b -> b 1")
     xt_B_C_T_H_W, vt_B_C_T_H_W = model.rectified_flow.get_interpolation(epsilon_B_C_T_H_W, x0_B_C_T_H_W, sigmas)
+
+    self_forcing_applied = False
+    self_forcing_prob = _get_self_forcing_probability(model, iteration)
+    if _should_apply_self_forcing(model, self_forcing_prob, condition):
+        condition = _apply_self_forcing(
+            model=model,
+            condition=condition,
+            epsilon_B_C_T_H_W=epsilon_B_C_T_H_W,
+            xt_B_C_T_H_W=xt_B_C_T_H_W,
+            timesteps_B_T=timesteps,
+        )
+        self_forcing_applied = True
 
     vt_pred_B_C_T_H_W = model.denoise(
         noise=epsilon_B_C_T_H_W,
@@ -650,6 +674,437 @@ def training_step_multiview(
         "condition": condition,
         "model_pred": vt_pred_B_C_T_H_W,
         "edm_loss": loss,
+        "self_forcing_applied": torch.tensor(float(self_forcing_applied), device=loss.device),
+        "self_forcing_prob": torch.tensor(float(self_forcing_prob), device=loss.device),
     }
 
     return output_batch, loss
+
+
+def _condition_replace(condition: Any, **updates: Any) -> Any:
+    kwargs = condition.to_dict(skip_underscore=False)
+    kwargs.update(updates)
+    return type(condition)(**kwargs)
+
+
+def _get_self_forcing_probability(model: Any, iteration: int) -> float:
+    enabled = bool(getattr(model.config, "self_forcing_enabled", False))
+    if not enabled:
+        return 0.0
+    max_prob = float(getattr(model.config, "self_forcing_prob", 0.0))
+    if max_prob <= 0.0:
+        return 0.0
+    warmup_iter = int(getattr(model.config, "self_forcing_warmup_iter", 0))
+    if iteration < warmup_iter:
+        return 0.0
+    ramp_iters = int(getattr(model.config, "self_forcing_ramp_iters", 0))
+    if ramp_iters <= 0:
+        return max_prob
+    progress = min(1.0, float(iteration - warmup_iter + 1) / float(ramp_iters))
+    return max_prob * progress
+
+
+def _should_apply_self_forcing(model: Any, self_forcing_prob: float, condition: Any) -> bool:
+    if self_forcing_prob <= 0.0:
+        return False
+    if not hasattr(condition, "condition_video_input_mask_B_C_T_H_W"):
+        return False
+    condition_mask = condition.condition_video_input_mask_B_C_T_H_W
+    if condition_mask is None or condition_mask.numel() == 0:
+        return False
+    return _sample_synced_self_forcing_decision(self_forcing_prob, condition_mask.device)
+
+
+def _apply_self_forcing(
+    model: Any,
+    condition: Any,
+    epsilon_B_C_T_H_W: torch.Tensor,
+    xt_B_C_T_H_W: torch.Tensor,
+    timesteps_B_T: torch.Tensor,
+):
+    """
+    Self-forcing for train-time conditioning:
+    1) Run a no-grad teacher pass without GT-frame injection mask.
+    2) Convert velocity prediction to x0.
+    3) Replace only conditional-frame GT slots with predicted x0.
+    """
+    condition_mask = condition.condition_video_input_mask_B_C_T_H_W
+    if condition_mask is None:
+        return condition
+
+    teacher_condition = _condition_replace(
+        condition,
+        condition_video_input_mask_B_C_T_H_W=torch.zeros_like(condition_mask),
+    )
+
+    prev_net = None
+    use_ema_teacher = bool(getattr(model.config, "self_forcing_use_ema_teacher", False))
+    if use_ema_teacher and hasattr(model, "net_ema") and model.net_ema is not None:
+        # Guard against EMA on CPU while training tensors are on CUDA.
+        ema_param = next(model.net_ema.parameters(), None)
+        train_device = xt_B_C_T_H_W.device
+        if ema_param is not None and ema_param.device == train_device:
+            prev_net = model.net
+            model.net = model.net_ema
+
+    has_denoise_replace = hasattr(model.config, "denoise_replace_gt_frames")
+    prev_denoise_replace = getattr(model.config, "denoise_replace_gt_frames", None)
+    if has_denoise_replace:
+        model.config.denoise_replace_gt_frames = False
+
+    try:
+        with torch.no_grad():
+            teacher_v_B_C_T_H_W = model.denoise(
+                noise=epsilon_B_C_T_H_W,
+                xt_B_C_T_H_W=xt_B_C_T_H_W.to(**model.tensor_kwargs),
+                timesteps_B_T=timesteps_B_T,
+                condition=teacher_condition,
+            ).float()
+            teacher_x0_B_C_T_H_W = epsilon_B_C_T_H_W - teacher_v_B_C_T_H_W
+            teacher_x0_B_C_T_H_W = teacher_x0_B_C_T_H_W.to(dtype=condition.gt_frames.dtype)
+            cond_mask = condition_mask.to(dtype=condition.gt_frames.dtype)
+            replaced_gt = cond_mask * teacher_x0_B_C_T_H_W + (1.0 - cond_mask) * condition.gt_frames
+            condition = _condition_replace(condition, gt_frames=replaced_gt.detach())
+    finally:
+        if has_denoise_replace:
+            model.config.denoise_replace_gt_frames = prev_denoise_replace
+        if prev_net is not None:
+            model.net = prev_net
+
+    return condition
+
+
+def _should_use_autoregressive_self_forcing(
+    model: Any,
+    data_batch: dict[str, torch.Tensor],
+    condition: Any,
+    x0_B_C_T_H_W: torch.Tensor,
+) -> bool:
+    if not bool(getattr(model.config, "self_forcing_enabled", False)):
+        return False
+    if not bool(getattr(model.config, "self_forcing_autoregressive", False)):
+        return False
+
+    state_t = int(getattr(model, "state_t", 0))
+    if state_t <= 0:
+        return False
+
+    total_t = int(x0_B_C_T_H_W.shape[2])
+    n_views = _get_num_views(data_batch, condition, state_t)
+    if n_views <= 0 or total_t % n_views != 0:
+        return False
+    total_t_per_view = total_t // n_views
+    if total_t_per_view <= state_t:
+        return False
+
+    overlap = _get_self_forcing_overlap(model, state_t)
+    if overlap <= 0:
+        return False
+
+    return True
+
+
+def _get_context_parallel_group_safe():
+    if hasattr(parallel_state, "is_initialized") and parallel_state.is_initialized():
+        return parallel_state.get_context_parallel_group()
+    return None
+
+
+def _training_step_multiview_autoregressive(
+    model: Any,
+    x0_B_C_T_H_W: torch.Tensor,
+    condition: Any,
+    iteration: int,
+    data_batch: dict[str, torch.Tensor],
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    state_t = int(model.state_t)
+    n_views = _get_num_views(data_batch, condition, state_t)
+    total_t_per_view = x0_B_C_T_H_W.shape[2] // n_views
+    overlap = _get_self_forcing_overlap(model, state_t)
+    step = max(1, state_t - overlap)
+    num_chunks = max(1, (total_t_per_view - overlap + step - 1) // step)
+
+    max_chunks = int(getattr(model.config, "self_forcing_max_rollout_chunks", 0))
+    if max_chunks > 0:
+        num_chunks = min(num_chunks, max_chunks)
+
+    losses = []
+    self_forcing_prob = _get_self_forcing_probability(model, iteration)
+    self_forcing_applied = False
+    prev_generated_x0 = None
+    last_output_batch = None
+
+    for chunk_idx in range(num_chunks):
+        start_frame = chunk_idx * step
+        end_frame = min(start_frame + state_t, total_t_per_view)
+        if start_frame >= total_t_per_view:
+            break
+
+        x0_chunk = _slice_multiview_window(x0_B_C_T_H_W, n_views=n_views, start_frame=start_frame, end_frame=end_frame)
+        condition_chunk = _slice_condition_window(
+            condition=condition,
+            n_views=n_views,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            total_t_per_view=total_t_per_view,
+        )
+
+        if chunk_idx > 0 and prev_generated_x0 is not None:
+            apply_rollout_self_forcing = _sample_synced_self_forcing_decision(self_forcing_prob, x0_chunk.device)
+            if apply_rollout_self_forcing:
+                detach_rollout = bool(getattr(model.config, "self_forcing_detach_rollout", True))
+                rollout_source = prev_generated_x0.detach() if detach_rollout else prev_generated_x0
+                condition_chunk, replaced = _inject_rollout_prediction_into_condition(
+                    condition=condition_chunk,
+                    generated_prev_chunk_x0=rollout_source,
+                    n_views=n_views,
+                    overlap=overlap,
+                )
+                self_forcing_applied = self_forcing_applied or replaced
+
+        output_batch_chunk, loss_chunk = _run_single_chunk_training_step(model, x0_chunk, condition_chunk)
+        losses.append(loss_chunk)
+        last_output_batch = output_batch_chunk
+
+        process_group = _get_context_parallel_group_safe()
+        cp_size = 1 if process_group is None else len(get_process_group_ranks(process_group))
+        if cp_size > 1:
+            # In CP mode model_pred is shard-local. Build a full-chunk rollout prediction for next chunk conditioning.
+            prev_generated_x0 = _predict_rollout_x0_full(
+                model=model,
+                condition_chunk=condition_chunk,
+                epsilon_full_B_C_T_H_W=output_batch_chunk["epsilon_full"],
+                xt_full_B_C_T_H_W=output_batch_chunk["xt_full"],
+                timesteps_full_B_T=output_batch_chunk["timesteps_full"],
+            )
+        else:
+            prev_generated_x0 = (output_batch_chunk["epsilon"] - output_batch_chunk["model_pred"]).to(
+                dtype=condition_chunk.gt_frames.dtype
+            )
+
+    if not losses:
+        raise RuntimeError("Autoregressive self-forcing was enabled but no training chunks were processed.")
+
+    loss = torch.stack(losses).mean()
+    assert last_output_batch is not None
+    output_batch = {
+        "x0": last_output_batch["x0"],
+        "xt": last_output_batch["xt"],
+        "sigma": last_output_batch["sigma"],
+        "condition": last_output_batch["condition"],
+        "model_pred": last_output_batch["model_pred"],
+        "edm_loss": loss,
+        "self_forcing_applied": torch.tensor(float(self_forcing_applied), device=loss.device),
+        "self_forcing_prob": torch.tensor(float(self_forcing_prob), device=loss.device),
+        "self_forcing_num_chunks": torch.tensor(float(len(losses)), device=loss.device),
+    }
+    return output_batch, loss
+
+
+def _run_single_chunk_training_step(
+    model: Any,
+    x0_chunk_B_C_T_H_W: torch.Tensor,
+    condition_chunk: Any,
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    epsilon_full_B_C_T_H_W = torch.randn(x0_chunk_B_C_T_H_W.size(), **model.tensor_kwargs_fp32)
+    batch_size = x0_chunk_B_C_T_H_W.size()[0]
+    t_B = model.rectified_flow.sample_train_time(batch_size).to(**model.tensor_kwargs_fp32)
+    t_B_full_B_T = rearrange(t_B, "b -> b 1")
+    timesteps_full_B_T = model.rectified_flow.get_discrete_timestamp(t_B_full_B_T, model.tensor_kwargs_fp32)
+    sigmas_full_B_T = model.rectified_flow.get_sigmas(
+        timesteps_full_B_T,
+        model.tensor_kwargs_fp32,
+    )
+    timesteps_full_B_T = rearrange(timesteps_full_B_T, "b -> b 1")
+    sigmas_full_B_T = rearrange(sigmas_full_B_T, "b -> b 1")
+    xt_full_B_C_T_H_W, vt_B_C_T_H_W = model.rectified_flow.get_interpolation(
+        epsilon_full_B_C_T_H_W, x0_chunk_B_C_T_H_W, sigmas_full_B_T
+    )
+
+    x0_B_C_T_H_W, condition_chunk, epsilon_B_C_T_H_W, t_B = model.broadcast_split_for_model_parallelsim(
+        x0_chunk_B_C_T_H_W, condition_chunk, epsilon_full_B_C_T_H_W, t_B_full_B_T
+    )
+    timesteps = model.rectified_flow.get_discrete_timestamp(t_B, model.tensor_kwargs_fp32)
+    sigmas = model.rectified_flow.get_sigmas(
+        timesteps,
+        model.tensor_kwargs_fp32,
+    )
+    timesteps = rearrange(timesteps, "b -> b 1")
+    sigmas = rearrange(sigmas, "b -> b 1")
+    xt_B_C_T_H_W, vt_local_B_C_T_H_W = model.rectified_flow.get_interpolation(epsilon_B_C_T_H_W, x0_B_C_T_H_W, sigmas)
+
+    vt_pred_B_C_T_H_W = model.denoise(
+        noise=epsilon_B_C_T_H_W,
+        xt_B_C_T_H_W=xt_B_C_T_H_W.to(**model.tensor_kwargs),
+        timesteps_B_T=timesteps,
+        condition=condition_chunk,
+    )
+    time_weights_B = model.rectified_flow.train_time_weight(timesteps, model.tensor_kwargs_fp32)
+    per_instance_loss = torch.mean(
+        (vt_pred_B_C_T_H_W - vt_local_B_C_T_H_W) ** 2, dim=list(range(1, vt_pred_B_C_T_H_W.dim()))
+    )
+    loss = torch.mean(time_weights_B * per_instance_loss)
+    output_batch = {
+        "x0": x0_B_C_T_H_W,
+        "xt": xt_B_C_T_H_W,
+        "sigma": sigmas,
+        "condition": condition_chunk,
+        "model_pred": vt_pred_B_C_T_H_W,
+        "epsilon": epsilon_B_C_T_H_W,
+        "epsilon_full": epsilon_full_B_C_T_H_W,
+        "xt_full": xt_full_B_C_T_H_W,
+        "timesteps_full": timesteps_full_B_T,
+    }
+    return output_batch, loss
+
+
+def _get_num_views(data_batch: dict[str, torch.Tensor], condition: Any, state_t: int) -> int:
+    view_indices_B_T = getattr(condition, "view_indices_B_T", None)
+    if view_indices_B_T is not None and view_indices_B_T.ndim == 2 and state_t > 0:
+        if view_indices_B_T.shape[1] % state_t == 0:
+            n_views = int(view_indices_B_T.shape[1] // state_t)
+            if n_views > 0:
+                return n_views
+    sample_n_views = data_batch.get("sample_n_views")
+    if isinstance(sample_n_views, torch.Tensor) and sample_n_views.numel() > 0:
+        return int(sample_n_views.flatten()[0].item())
+    if isinstance(sample_n_views, int):
+        return sample_n_views
+    return 1
+
+
+def _get_self_forcing_overlap(model: Any, state_t: int) -> int:
+    overlap = int(getattr(model.config, "self_forcing_chunk_overlap", 0))
+    if overlap <= 0:
+        overlap = int(getattr(model.config, "max_num_conditional_frames_per_view", 0))
+    if overlap <= 0:
+        overlap = int(getattr(model.config, "max_num_conditional_frames", 0))
+    return min(max(overlap, 0), max(state_t - 1, 0))
+
+
+def _slice_multiview_window(
+    tensor_B_C_VT_H_W: torch.Tensor,
+    n_views: int,
+    start_frame: int,
+    end_frame: int,
+) -> torch.Tensor:
+    tensor_B_C_V_T_H_W = rearrange(tensor_B_C_VT_H_W, "B C (V T) H W -> B C V T H W", V=n_views)
+    tensor_B_C_V_T_H_W = tensor_B_C_V_T_H_W[:, :, :, start_frame:end_frame, :, :]
+    return rearrange(tensor_B_C_V_T_H_W, "B C V T H W -> B C (V T) H W")
+
+
+def _slice_condition_window(
+    condition: Any,
+    n_views: int,
+    start_frame: int,
+    end_frame: int,
+    total_t_per_view: int,
+) -> Any:
+    updates = {}
+    expected_total_t = n_views * total_t_per_view
+
+    for key in ["gt_frames", "condition_video_input_mask_B_C_T_H_W", "latent_control_input"]:
+        value = getattr(condition, key, None)
+        if value is None or not isinstance(value, torch.Tensor) or value.ndim != 5:
+            continue
+        if value.shape[2] != expected_total_t:
+            continue
+        updates[key] = _slice_multiview_window(value, n_views=n_views, start_frame=start_frame, end_frame=end_frame)
+
+    view_indices_B_T = getattr(condition, "view_indices_B_T", None)
+    if isinstance(view_indices_B_T, torch.Tensor) and view_indices_B_T.ndim == 2:
+        if view_indices_B_T.shape[1] == expected_total_t:
+            view_indices_B_V_T = rearrange(view_indices_B_T, "B (V T) -> B V T", V=n_views)
+            updates["view_indices_B_T"] = rearrange(view_indices_B_V_T[:, :, start_frame:end_frame], "B V T -> B (V T)")
+        elif view_indices_B_T.shape[1] % n_views == 0:
+            # Fallback for batches where only one chunk worth of view indices is provided.
+            base_t = view_indices_B_T.shape[1] // n_views
+            view_indices_B_V_T = rearrange(view_indices_B_T, "B (V T) -> B V T", V=n_views)
+            repeats = max(1, (total_t_per_view + base_t - 1) // base_t)
+            view_indices_tiled = view_indices_B_V_T.repeat(1, 1, repeats)[:, :, :total_t_per_view]
+            updates["view_indices_B_T"] = rearrange(view_indices_tiled[:, :, start_frame:end_frame], "B V T -> B (V T)")
+
+    if not updates:
+        return condition
+    return _condition_replace(condition, **updates)
+
+
+def _inject_rollout_prediction_into_condition(
+    condition: Any,
+    generated_prev_chunk_x0: torch.Tensor,
+    n_views: int,
+    overlap: int,
+) -> tuple[Any, bool]:
+    if overlap <= 0:
+        return condition, False
+    condition_gt = getattr(condition, "gt_frames", None)
+    if condition_gt is None:
+        return condition, False
+
+    cur_chunk_t = int(condition_gt.shape[2] // n_views)
+    prev_chunk_t = int(generated_prev_chunk_x0.shape[2] // n_views)
+    overlap = min(overlap, cur_chunk_t, prev_chunk_t)
+    if overlap <= 0:
+        return condition, False
+
+    prev_tail = _slice_multiview_window(
+        generated_prev_chunk_x0, n_views=n_views, start_frame=prev_chunk_t - overlap, end_frame=prev_chunk_t
+    ).to(dtype=condition_gt.dtype, device=condition_gt.device)
+    prev_tail_B_C_V_T_H_W = rearrange(prev_tail, "B C (V T) H W -> B C V T H W", V=n_views)
+    gt_B_C_V_T_H_W = rearrange(condition_gt, "B C (V T) H W -> B C V T H W", V=n_views).clone()
+    gt_B_C_V_T_H_W[:, :, :, :overlap, :, :] = prev_tail_B_C_V_T_H_W
+
+    updates = {"gt_frames": rearrange(gt_B_C_V_T_H_W, "B C V T H W -> B C (V T) H W")}
+    condition_mask = getattr(condition, "condition_video_input_mask_B_C_T_H_W", None)
+    if condition_mask is not None:
+        mask_B_C_V_T_H_W = rearrange(condition_mask, "B C (V T) H W -> B C V T H W", V=n_views).clone()
+        mask_B_C_V_T_H_W[:, :, :, :overlap, :, :] = 1.0
+        updates["condition_video_input_mask_B_C_T_H_W"] = rearrange(mask_B_C_V_T_H_W, "B C V T H W -> B C (V T) H W")
+
+    return _condition_replace(condition, **updates), True
+
+
+def _sample_synced_self_forcing_decision(probability: float, device: torch.device) -> bool:
+    if probability <= 0.0:
+        return False
+    local = torch.tensor(float(torch.rand((), device=device).item() < probability), device=device)
+    cp_group = _get_context_parallel_group_safe()
+    if cp_group is not None:
+        local = broadcast(local, cp_group)
+    return bool(local.item() > 0.5)
+
+
+def _predict_rollout_x0_full(
+    model: Any,
+    condition_chunk: Any,
+    epsilon_full_B_C_T_H_W: torch.Tensor,
+    xt_full_B_C_T_H_W: torch.Tensor,
+    timesteps_full_B_T: torch.Tensor,
+) -> torch.Tensor:
+    cp_group = _get_context_parallel_group_safe()
+    was_cp_enabled = bool(getattr(model.net, "is_context_parallel_enabled", False))
+    if was_cp_enabled and hasattr(model.net, "disable_context_parallel"):
+        model.net.disable_context_parallel()
+
+    has_denoise_replace = hasattr(model.config, "denoise_replace_gt_frames")
+    prev_denoise_replace = getattr(model.config, "denoise_replace_gt_frames", None)
+    if has_denoise_replace:
+        model.config.denoise_replace_gt_frames = False
+
+    try:
+        with torch.no_grad():
+            vt_pred_full = model.denoise(
+                noise=epsilon_full_B_C_T_H_W,
+                xt_B_C_T_H_W=xt_full_B_C_T_H_W.to(**model.tensor_kwargs),
+                timesteps_B_T=timesteps_full_B_T,
+                condition=condition_chunk,
+            ).float()
+            x0_pred_full = epsilon_full_B_C_T_H_W - vt_pred_full
+            x0_pred_full = x0_pred_full.to(dtype=condition_chunk.gt_frames.dtype)
+    finally:
+        if has_denoise_replace:
+            model.config.denoise_replace_gt_frames = prev_denoise_replace
+        if was_cp_enabled and cp_group is not None and hasattr(model.net, "enable_context_parallel"):
+            model.net.enable_context_parallel(cp_group)
+
+    return x0_pred_full

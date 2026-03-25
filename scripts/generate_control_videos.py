@@ -88,6 +88,8 @@ def main(input_dir: Path, output_dir: Path, cameras: str, clip_id: str | None) -
         camera_names,
         SETTINGS["RESIZE_RESOLUTION"],
     )
+    logger.info(f"  - all camera models: {len(all_camera_models)}")
+    logger.info(f"  - all camera poses: {len(all_camera_poses)}")
 
     # Render using simplified output structure
     render_multi_camera_tiled(

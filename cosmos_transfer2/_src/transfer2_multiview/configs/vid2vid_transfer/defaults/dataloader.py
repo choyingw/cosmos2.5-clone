@@ -67,6 +67,7 @@ def register_dataloaders() -> None:
                 ]:  # N.B. mads_multiview_0823 dataset has videos at 10Hz, not 30Hz!
                     for num_video_frames_str, num_video_frames in [
                         ("29frames", 29),
+                        ("49frames", 49),
                         ("61frames", 61),
                         ("93frames", 93),
                     ]:

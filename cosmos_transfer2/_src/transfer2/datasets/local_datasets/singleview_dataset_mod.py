@@ -79,7 +79,11 @@ CTRL_TYPE_INFO = {
     "keypoint": {"folder": "keypoint", "format": "pickle", "data_dict_key": "keypoint"},
     "depth": {"folder": "depth", "format": "mp4", "data_dict_key": "depth"},
     "seg": {"folder": "seg", "format": "mp4", "data_dict_key": "segmentation"},
-    "edge": {"folder": None},  # Canny edge, computed on-the-fly by augmentor
+    "edge": {
+        "folder": "edges",
+        "format": "mp4",
+        "data_dict_key": "edge",
+    },  # Canny edge, computed on-the-fly by augmentor
     "vis": {"folder": None},  # Blur, computed on-the-fly by augmentor
 }
 
@@ -140,6 +144,11 @@ class SingleViewTransferDataset(Dataset):
             )
         self.ctrl_config = CTRL_TYPE_INFO[self.ctrl_type]
 
+        if self.ctrl_type == "edge" and self.ctrl_config["folder"] is not None:
+            augmentor_input_type = "depth"
+        else:
+            augmentor_input_type = self.ctrl_type
+
         # Set up directories
         video_dir = os.path.join(self.dataset_dir, "videos")
         self.video_paths = sorted([os.path.join(video_dir, f) for f in os.listdir(video_dir) if f.endswith(".mp4")])
@@ -158,12 +167,21 @@ class SingleViewTransferDataset(Dataset):
         # This includes randomized edge detection, reflection padding, and text transforms
         # Pass embedding_type=None since we're handling T5 embeddings ourselves
         # (if embedding_type is set, the function returns early with only video_parsing)
+
+        # augmentor_config = get_video_augmentor_v2_with_control(
+        #     resolution=resolution,
+        #     caption_type=caption_type,
+        #     embedding_type=None,  # We handle embeddings ourselves, get full augmentor pipeline
+        #     control_input_type=self.ctrl_type,
+        #     use_random=is_train,  # Enable random augmentations for training
+        # )
+
         augmentor_config = get_video_augmentor_v2_with_control(
             resolution=resolution,
             caption_type=caption_type,
-            embedding_type=None,  # We handle embeddings ourselves, get full augmentor pipeline
-            control_input_type=self.ctrl_type,
-            use_random=is_train,  # Enable random augmentations for training
+            embedding_type=None,
+            control_input_type=augmentor_input_type,  # Pass 'depth' here if using pre-computed edges
+            use_random=is_train,
         )
 
         # Filter out augmentors that don't apply to local datasets
@@ -340,48 +358,65 @@ class SingleViewTransferDataset(Dataset):
 
         data_dict = {}
 
-        try:
-            if self.ctrl_type == "seg":
-                # Load segmentation video (same format as depth)
-                vr = VideoReader(ctrl_path, ctx=cpu(0))
-                if len(vr) < frame_ids[-1] + 1:
-                    raise ValueError(f"Seg video has fewer frames than RGB video: {ctrl_path}")
+        # try:
+        if self.ctrl_type == "seg":
+            # Load segmentation video (same format as depth)
+            vr = VideoReader(ctrl_path, ctx=cpu(0))
+            if len(vr) < frame_ids[-1] + 1:
+                raise ValueError(f"Seg video has fewer frames than RGB video: {ctrl_path}")
 
-                seg_frames = vr.get_batch(frame_ids).asnumpy()  # [T, H, W, C]
-                seg_frames = seg_frames.astype(np.uint8)
-                # Convert to tensor - augmentor will handle resizing to match video
-                seg_t = torch.from_numpy(seg_frames).permute(0, 3, 1, 2)  # (T, C, H, W) uint8
-                seg_video = seg_t.permute(1, 0, 2, 3)  # (C, T, H, W) uint8
+            seg_frames = vr.get_batch(frame_ids).asnumpy()  # [T, H, W, C]
+            seg_frames = seg_frames.astype(np.uint8)
+            # Convert to tensor - augmentor will handle resizing to match video
+            seg_t = torch.from_numpy(seg_frames).permute(0, 3, 1, 2)  # (T, C, H, W) uint8
+            seg_video = seg_t.permute(1, 0, 2, 3)  # (C, T, H, W) uint8
 
-                # Store with the key expected by AddControlInputSeg augmentor
-                data_dict["segmentation"] = seg_video
-                del vr
+            # Store with the key expected by AddControlInputSeg augmentor
+            data_dict["segmentation"] = seg_video
+            del vr
 
-            elif self.ctrl_type == "keypoint":
-                # Load keypoint pickle
-                with open(ctrl_path, "rb") as f:
-                    keypoint_data = pickle.load(f)
-                data_dict["keypoint"] = keypoint_data
+        elif self.ctrl_type == "keypoint":
+            # Load keypoint pickle
+            with open(ctrl_path, "rb") as f:
+                keypoint_data = pickle.load(f)
+            data_dict["keypoint"] = keypoint_data
 
-            elif self.ctrl_type == "depth":
-                # Load depth video
-                vr = VideoReader(ctrl_path, ctx=cpu(0))
-                if len(vr) < frame_ids[-1] + 1:
-                    raise ValueError(f"Depth video has fewer frames than RGB video: {ctrl_path}")
+        elif self.ctrl_type == "depth":
+            # Load depth video
+            vr = VideoReader(ctrl_path, ctx=cpu(0))
+            if len(vr) < frame_ids[-1] + 1:
+                raise ValueError(f"Depth video has fewer frames than RGB video: {ctrl_path}")
 
-                depth_frames = vr.get_batch(frame_ids).asnumpy()  # [T, H, W, C]
-                depth_frames = depth_frames.astype(np.uint8)
-                # Convert to tensor - augmentor will handle resizing to match video
-                depth_t = torch.from_numpy(depth_frames).permute(0, 3, 1, 2)  # (T, C, H, W) uint8
-                depth_video = depth_t.permute(1, 0, 2, 3)  # (C, T, H, W) uint8
+            depth_frames = vr.get_batch(frame_ids).asnumpy()  # [T, H, W, C]
+            depth_frames = depth_frames.astype(np.uint8)
+            # Convert to tensor - augmentor will handle resizing to match video
+            depth_t = torch.from_numpy(depth_frames).permute(0, 3, 1, 2)  # (T, C, H, W) uint8
+            depth_video = depth_t.permute(1, 0, 2, 3)  # (C, T, H, W) uint8
 
-                # Store with the key expected by AddControlInputDepth augmentor
-                data_dict["depth"] = depth_video
-                del vr
+            # Store with the key expected by AddControlInputDepth augmentor
+            data_dict["depth"] = depth_video
+            del vr
+        elif self.ctrl_type == "edge":
+            # Load edge video (assumed to be png)
+            vr = VideoReader(ctrl_path, ctx=cpu(0))
+            print(len(vr), frame_ids[-1] + 1)
+            # if len(vr) < frame_ids[-1] + 1:
+            #     raise ValueError(f"Edge video has fewer frames than RGB video: {ctrl_path}")
 
-        except Exception as e:
-            log.warning(f"Failed to load control data from {ctrl_path}: {e}")
-            return None
+            edge_frames = vr.get_batch(frame_ids).asnumpy()  # [T, H, W, C]
+            edge_frames = edge_frames.astype(np.uint8)
+
+            # Convert to tensor (C, T, H, W)
+            edge_t = torch.from_numpy(edge_frames).permute(0, 3, 1, 2)
+            edge_video = edge_t.permute(1, 0, 2, 3)
+
+            # Store as "edge" (matching CTRL_TYPE_INFO data_dict_key)
+            data_dict["edge"] = edge_video
+            del vr
+
+        # except Exception as e:
+        #     log.warning(f"Failed to load control data from {ctrl_path}: {e}")
+        #     return None
 
         return data_dict
 
@@ -417,145 +452,148 @@ class SingleViewTransferDataset(Dataset):
                 index = (index + 1) % len(self.video_paths)
                 continue
 
-            try:
-                video_path = self.video_paths[index]
-                video_name = os.path.basename(video_path).replace(".mp4", "")
+            # try:
+            video_path = self.video_paths[index]
+            video_name = os.path.basename(video_path).replace(".mp4", "")
 
-                # Load video frames
-                frames, fps, frame_ids = self._load_video(video_path)
-                frames = frames.astype(np.uint8)
+            # Load video frames
+            frames, fps, frame_ids = self._load_video(video_path)
+            frames = frames.astype(np.uint8)
 
-                # Convert to tensor - augmentor will handle resizing and padding
-                # frames: numpy (T, H, W, C) uint8
-                frames_t = torch.from_numpy(frames).permute(0, 3, 1, 2)  # (T, C, H, W) uint8
-                # Permute to (C, T, H, W) format expected by augmentors
-                video = frames_t.permute(1, 0, 2, 3)  # (C, T, H, W) uint8
-                aspect_ratio = detect_aspect_ratio((video.shape[3], video.shape[2]))  # (W, H)
+            # Convert to tensor - augmentor will handle resizing and padding
+            # frames: numpy (T, H, W, C) uint8
+            frames_t = torch.from_numpy(frames).permute(0, 3, 1, 2)  # (T, C, H, W) uint8
+            # Permute to (C, T, H, W) format expected by augmentors
+            video = frames_t.permute(1, 0, 2, 3)  # (C, T, H, W) uint8
+            aspect_ratio = detect_aspect_ratio((video.shape[3], video.shape[2]))  # (W, H)
 
-                # Build data dictionary
-                data = {
-                    "video": video,
-                    "aspect_ratio": aspect_ratio,
-                    "fps": fps,
-                    "frame_start": frame_ids[0],
-                    "frame_end": frame_ids[-1] + 1,
-                    "num_frames": self.sequence_length,
-                    "chunk_index": 0,
-                    "frame_indices": frame_ids,
-                    "n_orig_video_frames": len(frame_ids),
-                }
+            # Build data dictionary
+            data = {
+                "video": video,
+                "aspect_ratio": aspect_ratio,
+                "fps": fps,
+                "frame_start": frame_ids[0],
+                "frame_end": frame_ids[-1] + 1,
+                "num_frames": self.sequence_length,
+                "chunk_index": 0,
+                "frame_indices": frame_ids,
+                "n_orig_video_frames": len(frame_ids),
+            }
 
-                # Load caption
-                caption = self._load_caption(video_name)
-                data[self.caption_type] = caption
+            # Load caption
+            caption = self._load_caption(video_name)
+            data[self.caption_type] = caption
 
-                # Create metadata structure for augmentor compatibility
-                # The augmentor expects "metas" with window information
-                # Map caption_type to the expected caption key in window_data
-                if self.caption_type == "t2w_qwen2p5_7b":
-                    caption_key_in_window = "qwen2p5_7b_caption"  # gitleaks:allow
-                else:
-                    caption_key_in_window = self.caption_type
+            # Create metadata structure for augmentor compatibility
+            # The augmentor expects "metas" with window information
+            # Map caption_type to the expected caption key in window_data
+            if self.caption_type == "t2w_qwen2p5_7b":
+                caption_key_in_window = "qwen2p5_7b_caption"  # gitleaks:allow
+            else:
+                caption_key_in_window = self.caption_type
 
-                window_data = {
-                    "start_frame": frame_ids[0],
-                    "end_frame": frame_ids[-1] + 1,
-                    caption_key_in_window: caption,
-                }
-                data["metas"] = {
-                    "framerate": fps,
-                    "nb_frames": len(frame_ids),
-                    # Create a single window spanning the entire video segment
-                    # Include both windows and t2w_windows for different caption types
-                    "windows": [window_data],
-                    "t2w_windows": [window_data],
-                    "i2w_windows_later_frames": [window_data],
-                }
+            window_data = {
+                "start_frame": frame_ids[0],
+                "end_frame": frame_ids[-1] + 1,
+                caption_key_in_window: caption,
+            }
+            data["metas"] = {
+                "framerate": fps,
+                "nb_frames": len(frame_ids),
+                # Create a single window spanning the entire video segment
+                # Include both windows and t2w_windows for different caption types
+                "windows": [window_data],
+                "t2w_windows": [window_data],
+                "i2w_windows_later_frames": [window_data],
+            }
 
-                # Pass raw caption for on-the-fly encoding by model's text encoder
-                # (Like multiview dataset - model will encode with Qwen/reason1 encoder)
-                data["ai_caption"] = caption
+            # Pass raw caption for on-the-fly encoding by model's text encoder
+            # (Like multiview dataset - model will encode with Qwen/reason1 encoder)
+            data["ai_caption"] = caption
 
-                # Add URL and key for logging (used by augmentors and training)
-                # Use MockUrl object for augmentor compatibility (augmentors expect __url__.meta.opts)
-                data["__url__"] = MockUrl(str(self.dataset_dir))
-                data["__key__"] = video_name
+            # Add URL and key for logging (used by augmentors and training)
+            # Use MockUrl object for augmentor compatibility (augmentors expect __url__.meta.opts)
+            data["__url__"] = MockUrl(str(self.dataset_dir))
+            data["__key__"] = video_name
 
-                # Load control input data (if pre-computed)
-                ctrl_data = self._load_control_data(video_name, frame_ids)
-                if ctrl_data is not None:
-                    data.update(ctrl_data)
+            # Load control input data (if pre-computed)
+            ctrl_data = self._load_control_data(video_name, frame_ids)
+            if ctrl_data is not None:
+                data.update(ctrl_data)
 
-                # Apply augmentation pipeline
-                # This includes: resizing, padding, text transform, and control input generation
-                # The augmentor will handle edge detection with randomized thresholds for training
-                for aug_name, aug_fn in self.augmentor.items():
-                    result = aug_fn(data)
-                    # Check if augmentor returned None (e.g., filtering)
-                    if result is None:
-                        raise ValueError(f"Augmentor {aug_name} filtered out the sample")
-                    data = result
+            if self.ctrl_type == "edge" and "edge" in data:
+                data["depth"] = data.pop("edge")
+            # Apply augmentation pipeline
+            # This includes: resizing, padding, text transform, and control input generation
+            # The augmentor will handle edge detection with randomized thresholds for training
+            for aug_name, aug_fn in self.augmentor.items():
+                result = aug_fn(data)
+                # Check if augmentor returned None (e.g., filtering)
+                if result is None:
+                    raise ValueError(f"Augmentor {aug_name} filtered out the sample")
+                data = result
 
-                # Convert MockUrl back to string for DataLoader collate compatibility
-                # (PyTorch's collate function can't handle custom objects)
-                if isinstance(data.get("__url__"), MockUrl):
-                    data["__url__"] = str(data["__url__"])
+            if self.ctrl_type == "edge" and "control_input_depth" in data:
+                data["control_input_edge"] = data.pop("control_input_depth")
 
-                # Add final metadata (after augmentation)
-                c, t, h, w = data["video"].shape
-                if "image_size" not in data:
-                    data["image_size"] = torch.tensor([h, w, h, w])
-                if "padding_mask" not in data:
-                    data["padding_mask"] = torch.ones(1, h, w)  # All valid (no padding)
+            # Convert MockUrl back to string for DataLoader collate compatibility
+            # (PyTorch's collate function can't handle custom objects)
+            if isinstance(data.get("__url__"), MockUrl):
+                data["__url__"] = str(data["__url__"])
 
-                # Validate output format after augmentation
-                assert data["video"].dtype == torch.uint8, f"Video dtype is {data['video'].dtype}, expected uint8"
-                assert data["video"].shape[0] == 3, f"Video should have 3 channels, got {data['video'].shape[0]}"
-                assert (
-                    data["video"].shape[1] == self.sequence_length
-                ), f"Video should have {self.sequence_length} frames, got {data['video'].shape[1]}"
+            # Add final metadata (after augmentation)
+            c, t, h, w = data["video"].shape
+            if "image_size" not in data:
+                data["image_size"] = torch.tensor([h, w, h, w])
+            if "padding_mask" not in data:
+                data["padding_mask"] = torch.ones(1, h, w)  # All valid (no padding)
 
-                # Check control input exists and has correct format
-                ctrl_key = f"control_input_{self.ctrl_type}"
-                assert ctrl_key in data, f"Control input key '{ctrl_key}' not found in data"
-                assert (
-                    data[ctrl_key].dtype == torch.uint8
-                ), f"Control input dtype is {data[ctrl_key].dtype}, expected uint8"
-                assert (
-                    data[ctrl_key].shape == data["video"].shape
-                ), f"Control input shape {data[ctrl_key].shape} doesn't match video shape {data['video'].shape}"
+            # Validate output format after augmentation
+            assert data["video"].dtype == torch.uint8, f"Video dtype is {data['video'].dtype}, expected uint8"
+            assert data["video"].shape[0] == 3, f"Video should have 3 channels, got {data['video'].shape[0]}"
+            assert (
+                data["video"].shape[1] == self.sequence_length
+            ), f"Video should have {self.sequence_length} frames, got {data['video'].shape[1]}"
 
-                log.debug(
-                    f"Dataset sample ready: video={data['video'].shape} {data['video'].dtype}, "
-                    f"{ctrl_key}={data[ctrl_key].shape} {data[ctrl_key].dtype}, "
-                )
+            # Check control input exists and has correct format
+            ctrl_key = f"control_input_{self.ctrl_type}"
+            assert ctrl_key in data, f"Control input key '{ctrl_key}' not found in data"
+            assert data[ctrl_key].dtype == torch.uint8, f"Control input dtype is {data[ctrl_key].dtype}, expected uint8"
+            assert (
+                data[ctrl_key].shape == data["video"].shape
+            ), f"Control input shape {data[ctrl_key].shape} doesn't match video shape {data['video'].shape}"
 
-                return data
+            log.debug(
+                f"Dataset sample ready: video={data['video'].shape} {data['video'].dtype}, "
+                f"{ctrl_key}={data[ctrl_key].shape} {data[ctrl_key].dtype}, "
+            )
 
-            except Exception as e:
-                self.num_failed_loads += 1
-                # Mark this video as bad so we skip it in the future
-                self.bad_video_indices.add(index)
+            return data
 
-                log.warning(
-                    f"Failed to load video {self.video_paths[index]} (index {index}): {e}. "
-                    f"Marking as bad and trying next video. "
-                    f"(attempt {retry + 1}/{max_retries}, total bad videos: {len(self.bad_video_indices)})",
-                    rank0_only=False,
-                )
+            # except Exception as e:
+            #     self.num_failed_loads += 1
+            #     # Mark this video as bad so we skip it in the future
+            #     self.bad_video_indices.add(index)
 
-                if retry == max_retries - 1:
-                    log.error(
-                        f"Failed to load data after {max_retries} attempts starting from index {original_index}. "
-                        f"Total bad videos: {len(self.bad_video_indices)}/{len(self.video_paths)}"
-                    )
-                    raise RuntimeError(
-                        f"Failed to load data after {max_retries} attempts. "
-                        f"Original index: {original_index}, last tried: {video_path}"
-                    )
+            #     log.warning(
+            #         f"Failed to load video {self.video_paths[index]} (index {index}): {e}. "
+            #         f"Marking as bad and trying next video. "
+            #         f"(attempt {retry + 1}/{max_retries}, total bad videos: {len(self.bad_video_indices)})",
+            #         rank0_only=False,
+            #     )
 
-                # Try the next video in sequence (wraps around at end)
-                index = (index + 1) % len(self.video_paths)
+            #     if retry == max_retries - 1:
+            #         log.error(
+            #             f"Failed to load data after {max_retries} attempts starting from index {original_index}. "
+            #             f"Total bad videos: {len(self.bad_video_indices)}/{len(self.video_paths)}"
+            #         )
+            #         raise RuntimeError(
+            #             f"Failed to load data after {max_retries} attempts. "
+            #             f"Original index: {original_index}, last tried: {video_path}"
+            #         )
+
+            #     # Try the next video in sequence (wraps around at end)
+            #     index = (index + 1) % len(self.video_paths)
 
         raise RuntimeError("Should not reach here")
 
@@ -573,8 +611,8 @@ if __name__ == "__main__":
     dataset = SingleViewTransferDataset(
         dataset_dir="sample_data",
         num_frames=93,
-        video_size=(480, 640),
-        resolution="480",
+        video_size=(704, 1280),
+        resolution="720",
         hint_key="control_input_edge",
         is_train=True,
     )
@@ -589,24 +627,21 @@ if __name__ == "__main__":
     indices = [0] if len(dataset) > 0 else []
     for idx in indices[:1]:
         log.info(f"\nTesting sample {idx}:")
-        try:
-            data = dataset[idx]
-            log.info(f"  Video shape: {data['video'].shape}")
-            log.info(f"  Control input shape: {data['control_input_edge'].shape}")
-            log.info(f"  Caption: {data.get('ai_caption', 'N/A')[:100]}...")
-            log.info(f"  FPS: {data['fps']}")
-            log.info(f"  Aspect ratio: {data['aspect_ratio']}")
-            log.info("  ✅ Sample loaded successfully")
+        # try:
+        data = dataset[idx]
+        log.info(f"  Video shape: {data['video'].shape}")
+        log.info(f"  Control input shape: {data['control_input_edge'].shape}")
+        log.info(f"  Caption: {data.get('ai_caption', 'N/A')[:100]}...")
+        log.info(f"  FPS: {data['fps']}")
+        log.info(f"  Aspect ratio: {data['aspect_ratio']}")
+        log.info("  ✅ Sample loaded successfully")
 
-            out_path = "/home/choyingw/mnt/cosmos-transfer2.5/output_edges"
-            os.makedirs(out_path, exist_ok=True)
-            print("SDWDWDW")
+        out_path = "/home/choyingw/mnt/cosmos-transfer2.5/output_edges"
+        os.makedirs(out_path, exist_ok=True)
 
-            for i in range(93):
-                edge = data["control_input_edge"][:, i].permute(1, 2, 0).numpy()
-                print(edge.shape, edge.dtype, edge.min(), edge.max())
-                cv2.imwrite(f"{out_path}/edge_{i:03d}.png", edge)
-
+        for i in range(93):
+            edge = data["control_input_edge"][:, i].permute(1, 2, 0).numpy()
+            # cv2.imwrite(f"{out_path}/edge_{i:03d}.png", edge)
         except Exception as e:
             log.error(f"  ❌ Failed to load sample: {e}")
             sys.exit(1)

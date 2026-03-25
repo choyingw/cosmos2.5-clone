@@ -85,11 +85,103 @@ transfer2_auto_multiview_post_train_example = dict(
     ),
 )
 
+transfer2_auto_multiview_post_train_example_self_forcing = dict(
+    defaults=[
+        f"/experiment/{DEFAULT_CHECKPOINT.experiment}",
+        {"override /data_train": "example_multiview_train_data_control_input_hdmap"},
+    ],
+    job=dict(
+        project="cosmos_transfer_v2p5",
+        group="auto_multiview",
+        name="2b_cosmos_multiview_post_train_example_self_forcing",
+    ),
+    checkpoint=dict(
+        save_iter=200,
+        # pyrefly: ignore  # missing-attribute
+        load_path=get_checkpoint_path(DEFAULT_CHECKPOINT.s3.uri),
+        load_training_state=False,
+        strict_resume=False,
+        load_from_object_store=dict(
+            enabled=False,
+        ),
+        save_to_object_store=dict(
+            enabled=False,
+        ),
+    ),
+    model=dict(
+        config=dict(
+            base_load_from=None,
+            # Keep the original 29-frame chunk size in latent space.
+            state_t=8,
+            self_forcing_enabled=True,
+            self_forcing_prob=0.2,
+            self_forcing_warmup_iter=100,
+            self_forcing_ramp_iters=1_000,
+            self_forcing_use_ema_teacher=False,
+            self_forcing_autoregressive=True,
+            self_forcing_chunk_overlap=2,
+            self_forcing_detach_rollout=True,
+            net=dict(
+                state_t=8,
+            ),
+        ),
+    ),
+    trainer=dict(
+        logging_iter=100,
+        max_iter=5_000,
+        callbacks=dict(
+            heart_beat=dict(
+                save_s3=False,
+            ),
+            iter_speed=dict(
+                hit_thres=200,
+                save_s3=False,
+            ),
+            device_monitor=dict(
+                save_s3=False,
+            ),
+            every_n_sample_reg=dict(
+                every_n=200,
+                save_s3=False,
+            ),
+            every_n_sample_ema=dict(
+                every_n=200,
+                save_s3=False,
+            ),
+            wandb=dict(
+                save_s3=False,
+            ),
+            wandb_10x=dict(
+                save_s3=False,
+            ),
+            dataloader_speed=dict(
+                save_s3=False,
+            ),
+            frame_loss_log=dict(
+                save_s3=False,
+            ),
+        ),
+    ),
+    dataloader_train=dict(
+        augmentation_config=dict(
+            # With state_t=8 and overlap=2, 61 pixel frames gives about 16 latent frames:
+            # 3 chunks total and 2 rollout opportunities.
+            num_video_frames=61,
+            single_caption_camera_name="camera_front_wide_120fov",
+            add_view_prefix_to_caption=True,
+        ),
+    ),
+    model_parallel=dict(
+        context_parallel_size=int(os.environ.get("WORLD_SIZE", "1")),
+    ),
+)
+
 cs = ConfigStore.instance()
 
 # Register the configuration with Hydra ConfigStore
 for _item in [
     transfer2_auto_multiview_post_train_example,
+    transfer2_auto_multiview_post_train_example_self_forcing,
 ]:
     experiment_name = [name.lower() for name, value in globals().items() if value is _item][0]  # noqa: RUF015
 

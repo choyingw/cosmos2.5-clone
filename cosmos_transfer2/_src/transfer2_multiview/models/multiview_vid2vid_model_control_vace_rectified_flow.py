@@ -59,6 +59,17 @@ class MultiviewControlVideo2WorldRectifiedFlowConfig(ControlVideo2WorldRectified
     view_condition_dropout_max: int = 0
     online_text_embeddings_as_dict: bool = True  # For backward compatibility with old experiments
     conditional_frames_probs: Optional[Dict[int, float]] = None  # Probability distribution for conditional frames
+    # Scheduled self-forcing for train-time conditioning replacement.
+    self_forcing_enabled: bool = False
+    self_forcing_prob: float = 0.0
+    self_forcing_warmup_iter: int = 0
+    self_forcing_ramp_iters: int = 0
+    self_forcing_use_ema_teacher: bool = False
+    # Self-forcing autoregressive rollout options.
+    self_forcing_autoregressive: bool = False
+    self_forcing_chunk_overlap: int = 0  # latent frames per view
+    self_forcing_detach_rollout: bool = True
+    self_forcing_max_rollout_chunks: int = 0  # 0 means use all chunks
 
 
 class MultiviewControlVideo2WorldModelRectifiedFlow(ControlVideo2WorldModelRectifiedFlow):

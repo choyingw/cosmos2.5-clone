@@ -30,6 +30,7 @@ torchrun --nproc_per_node=8 --master_port=12341 -m scripts.train --config=cosmos
 def buttercup_transfer2p5_2b_mv_7views_res720p_fps10_t8_fromfinetuned12knofpsuniform_mads720pmulticaps29frames_world_scenario_nofps_uniform() -> (
     dict
 ):
+    state_t = 8  # 29 pixel frames per chunk for Wan tokenizer
     text_encoder_ckpt_path = "s3://bucket/cosmos_reasoning1/sft_exp700/sft_exp721-1_qwen7b_tl_721_5vs5_s3_balanced_n32_resume_16k/checkpoints/iter_000016000/model/"
     base_load_path = "bucket/cosmos_predict2_multiview/cosmos2_mv/buttercup_predict2p5_2b_7views_res720p_fps30_t8_joint_alpamayo1capviewprefix_allcapsviewprefix_29frames_nofps_uniform_dropoutt0-0/checkpoints/iter_000012000/"
     base_load_credentials = "credentials/s3_checkpoint.secret"
@@ -91,7 +92,15 @@ def buttercup_transfer2p5_2b_mv_7views_res720p_fps10_t8_fromfinetuned12knofpsuni
                 condition_locations=["first_random_n"],
                 train_sample_views_range=[7, 7],
                 conditional_frames_probs={0: 0.5, 1: 0.25, 2: 0.25},
-                state_t=8,
+                state_t=state_t,
+                self_forcing_enabled=True,
+                self_forcing_prob=0.2,
+                self_forcing_warmup_iter=1_000,
+                self_forcing_ramp_iters=5_000,
+                self_forcing_use_ema_teacher=False,
+                self_forcing_autoregressive=True,
+                self_forcing_chunk_overlap=2,
+                self_forcing_detach_rollout=True,
                 online_text_embeddings_as_dict=False,
                 fsdp_shard_size=8,
                 resolution="720p",
@@ -104,7 +113,7 @@ def buttercup_transfer2p5_2b_mv_7views_res720p_fps10_t8_fromfinetuned12knofpsuni
                     use_wan_fp32_strategy=True,
                     concat_view_embedding=True,
                     view_condition_dim=7,
-                    state_t=8,
+                    state_t=state_t,
                     n_cameras_emb=7,
                     vace_has_mask=False,
                     use_input_hint_block=True,
@@ -113,7 +122,7 @@ def buttercup_transfer2p5_2b_mv_7views_res720p_fps10_t8_fromfinetuned12knofpsuni
                     rope_enable_fps_modulation=False,
                     rope_h_extrapolation_ratio=3.0,
                     rope_w_extrapolation_ratio=3.0,
-                    rope_t_extrapolation_ratio=8.0 / 24.0,
+                    rope_t_extrapolation_ratio=state_t / 24.0,
                     use_crossattn_projection=True,
                     crossattn_proj_in_channels=100352,
                     crossattn_emb_channels=1024,
