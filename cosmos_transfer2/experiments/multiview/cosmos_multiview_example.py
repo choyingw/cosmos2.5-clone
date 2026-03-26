@@ -169,13 +169,13 @@ transfer2_auto_multiview_post_train_example_self_forcing = dict(
     dataloader_train=dict(
         dataset=dict(
             dataset_dir="sample_sf",
-        ),
-        augmentation_config=dict(
-            # With state_t=8 and overlap=2, 61 pixel frames gives about 16 latent frames:
-            # 3 chunks total and 2 rollout opportunities.
-            num_video_frames=61,
-            single_caption_camera_name="camera_front_wide_120fov",
-            add_view_prefix_to_caption=True,
+            augmentation_config=dict(
+                # With state_t=8 and overlap=2, 61 pixel frames gives about 16 latent frames:
+                # 3 chunks total and 2 rollout opportunities.
+                num_video_frames=61,
+                single_caption_camera_name="camera_front_wide_120fov",
+                add_view_prefix_to_caption=True,
+            ),
         ),
     ),
     model_parallel=dict(
