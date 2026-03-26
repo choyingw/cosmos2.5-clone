@@ -252,6 +252,32 @@ class MultiviewControlVideo2WorldModelRectifiedFlow(ControlVideo2WorldModelRecti
         # encoded_tensors = [t.contiguous().float().to(**self.tensor_kwargs) for t in encoded_tensors]
         return encoded_tensors
 
+    @torch.no_grad()
+    def _encode_multiview_tensor(self, state: torch.Tensor, n_views: int) -> torch.Tensor:
+        cp_group = parallel_state.get_context_parallel_group()
+        cp_size = 1 if cp_group is None else len(get_process_group_ranks(cp_group))
+        if n_views > 1 and cp_group is not None and n_views <= cp_size:
+            return self._encode_multiview_tensor_cp(state, n_views, cp_group, cp_size)
+        state = rearrange(state, "B C (V T) H W -> (B V) C T H W", V=n_views)
+        encoded_state = super().encode(state)
+        encoded_state = rearrange(encoded_state, "(B V) C T H W -> B C (V T) H W", V=n_views)
+        return encoded_state
+
+    @torch.no_grad()
+    def _encode_multiview_tensor_cp(
+        self, state: torch.Tensor, n_views: int, cp_group: torch.distributed.ProcessGroup, cp_size: int
+    ) -> torch.Tensor:
+        state_V_B_C_T_H_W = rearrange(state, "B C (V T) H W -> V B C T H W", V=n_views)
+        state_input = torch.zeros((cp_size, *state_V_B_C_T_H_W.shape[1:]), **self.tensor_kwargs)
+        state_input[0:n_views] = state_V_B_C_T_H_W
+        local_state_V_B_C_T_H_W = broadcast_split_tensor(state_input, seq_dim=0, process_group=cp_group)
+        local_state = rearrange(local_state_V_B_C_T_H_W, "V B C T H W -> (B V) C T H W")
+        encoded_state = super().encode(local_state)
+        encoded_state_list = [torch.empty_like(encoded_state) for _ in range(cp_size)]
+        dist.all_gather(encoded_state_list, encoded_state, group=cp_group)
+        encoded_state = torch.cat(encoded_state_list[0:n_views], dim=2)
+        return encoded_state
+
     def get_data_and_condition(
         self, data_batch: dict[str, torch.Tensor]
     ) -> Tuple[Tensor, Tensor, MultiViewControlVideo2WorldCondition]:
@@ -262,6 +288,8 @@ class MultiviewControlVideo2WorldModelRectifiedFlow(ControlVideo2WorldModelRecti
 
         input_key = self.input_image_key if is_image_batch else self.input_data_key
         raw_state = data_batch_with_latent_view_indices[input_key]
+        num_video_frames_per_view = int(data_batch_with_latent_view_indices["num_video_frames_per_view"].cpu()[0])
+        n_views = raw_state.shape[2] // num_video_frames_per_view
 
         condition = self.conditioner(data_batch_with_latent_view_indices)
         condition = condition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
@@ -279,7 +307,7 @@ class MultiviewControlVideo2WorldModelRectifiedFlow(ControlVideo2WorldModelRecti
                 raw_and_control_inputs.append(control_input)
                 num_modalities += 1
         assert num_modalities > 0, "No control input found"
-        encoded_tensors = self._encode_raw_and_control_inputs(raw_and_control_inputs)
+        encoded_tensors = [self._encode_multiview_tensor(t, n_views) for t in raw_and_control_inputs]
         latent_state = encoded_tensors[0]
         zero_latent_state = torch.zeros_like(latent_state).to(**self.tensor_kwargs)
 
