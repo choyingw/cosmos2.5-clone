@@ -83,7 +83,7 @@ transfer2_auto_multiview_post_train_example = dict(
         ),
     ),
     model_parallel=dict(
-        context_parallel_size=int(os.environ.get("WORLD_SIZE", "1")),
+        context_parallel_size=min(4, int(os.environ.get("WORLD_SIZE", "1"))),
     ),
 )
 
