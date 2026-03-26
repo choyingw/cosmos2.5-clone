@@ -56,6 +56,8 @@ transfer2_auto_multiview_post_train_example = dict(
                 save_s3=False,
             ),
             device_monitor=dict(
+                every_n=100,
+                log_memory_detail=True,
                 save_s3=False,
             ),
             every_n_sample_reg=dict(
@@ -138,6 +140,8 @@ transfer2_auto_multiview_post_train_example_self_forcing = dict(
                 save_s3=False,
             ),
             device_monitor=dict(
+                every_n=5,
+                log_memory_detail=True,
                 save_s3=False,
             ),
             every_n_sample_reg=dict(
@@ -163,6 +167,9 @@ transfer2_auto_multiview_post_train_example_self_forcing = dict(
         ),
     ),
     dataloader_train=dict(
+        dataset=dict(
+            dataset_dir="sample_sf",
+        ),
         augmentation_config=dict(
             # With state_t=8 and overlap=2, 61 pixel frames gives about 16 latent frames:
             # 3 chunks total and 2 rollout opportunities.

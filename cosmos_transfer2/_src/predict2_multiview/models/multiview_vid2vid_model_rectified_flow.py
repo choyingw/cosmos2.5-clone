@@ -623,6 +623,26 @@ def training_step_multiview(
     # Get the input data to noise and denoise~(image, video) and the corresponding conditioner.
     _, x0_B_C_T_H_W, condition = model.get_data_and_condition(data_batch)
 
+    if _should_log_frame_debug(iteration):
+        num_video_frames_per_view = data_batch.get("num_video_frames_per_view")
+        if isinstance(num_video_frames_per_view, torch.Tensor):
+            num_video_frames_per_view = int(num_video_frames_per_view.flatten()[0].cpu().item())
+        elif num_video_frames_per_view is not None:
+            num_video_frames_per_view = int(num_video_frames_per_view)
+        n_views = _get_num_views(data_batch, condition, int(getattr(model, "state_t", 0)))
+        latent_t_total = int(x0_B_C_T_H_W.shape[2])
+        latent_t_per_view = latent_t_total // max(n_views, 1)
+        log.info(
+            "[self-forcing-train] iteration=%s pixel_frames_per_view=%s latent_frames_per_view=%s "
+            "n_views=%s x0_shape=%s %s",
+            iteration,
+            num_video_frames_per_view,
+            latent_t_per_view,
+            n_views,
+            tuple(x0_B_C_T_H_W.shape),
+            _get_cuda_memory_debug_string(x0_B_C_T_H_W.device),
+        )
+
     if _should_use_autoregressive_self_forcing(model, data_batch, condition, x0_B_C_T_H_W):
         return _training_step_multiview_autoregressive(model, x0_B_C_T_H_W, condition, iteration, data_batch)
 
@@ -685,6 +705,29 @@ def _condition_replace(condition: Any, **updates: Any) -> Any:
     kwargs = condition.to_dict(skip_underscore=False)
     kwargs.update(updates)
     return type(condition)(**kwargs)
+
+
+def _should_log_frame_debug(iteration: int) -> bool:
+    if dist.is_initialized() and dist.get_rank() != 0:
+        return False
+    return iteration < 5 or iteration % 100 == 0
+
+
+def _get_cuda_memory_debug_string(device: torch.device | None = None) -> str:
+    if not torch.cuda.is_available():
+        return "cuda_unavailable"
+    if device is None or device.type != "cuda":
+        device = torch.device("cuda", torch.cuda.current_device())
+    allocated_gb = torch.cuda.memory_allocated(device=device) / (1024**3)
+    reserved_gb = torch.cuda.memory_reserved(device=device) / (1024**3)
+    max_allocated_gb = torch.cuda.max_memory_allocated(device=device) / (1024**3)
+    max_reserved_gb = torch.cuda.max_memory_reserved(device=device) / (1024**3)
+    return (
+        f"cuda_allocated_gb={allocated_gb:.2f} "
+        f"cuda_reserved_gb={reserved_gb:.2f} "
+        f"cuda_max_allocated_gb={max_allocated_gb:.2f} "
+        f"cuda_max_reserved_gb={max_reserved_gb:.2f}"
+    )
 
 
 def _get_self_forcing_probability(model: Any, iteration: int) -> float:
@@ -848,6 +891,22 @@ def _training_step_multiview_autoregressive(
             end_frame=end_frame,
             total_t_per_view=total_t_per_view,
         )
+
+        if _should_log_frame_debug(iteration):
+            log.info(
+                "[self-forcing-ar] iteration=%s chunk=%s/%s latent_frames_per_view=%s "
+                "window=[%s,%s) overlap=%s n_views=%s x0_chunk_shape=%s %s",
+                iteration,
+                chunk_idx + 1,
+                num_chunks,
+                end_frame - start_frame,
+                start_frame,
+                end_frame,
+                overlap,
+                n_views,
+                tuple(x0_chunk.shape),
+                _get_cuda_memory_debug_string(x0_chunk.device),
+            )
 
         if chunk_idx > 0 and prev_generated_x0 is not None:
             apply_rollout_self_forcing = _sample_synced_self_forcing_decision(self_forcing_prob, x0_chunk.device)
