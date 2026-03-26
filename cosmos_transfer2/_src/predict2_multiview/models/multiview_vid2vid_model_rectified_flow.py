@@ -633,14 +633,13 @@ def training_step_multiview(
         latent_t_total = int(x0_B_C_T_H_W.shape[2])
         latent_t_per_view = latent_t_total // max(n_views, 1)
         log.info(
-            "[self-forcing-train] iteration=%s pixel_frames_per_view=%s latent_frames_per_view=%s "
-            "n_views=%s x0_shape=%s %s",
-            iteration,
-            num_video_frames_per_view,
-            latent_t_per_view,
-            n_views,
-            tuple(x0_B_C_T_H_W.shape),
-            _get_cuda_memory_debug_string(x0_B_C_T_H_W.device),
+            "[self-forcing-train] "
+            f"iteration={iteration} "
+            f"pixel_frames_per_view={num_video_frames_per_view} "
+            f"latent_frames_per_view={latent_t_per_view} "
+            f"n_views={n_views} "
+            f"x0_shape={tuple(x0_B_C_T_H_W.shape)} "
+            f"{_get_cuda_memory_debug_string(x0_B_C_T_H_W.device)}"
         )
 
     if _should_use_autoregressive_self_forcing(model, data_batch, condition, x0_B_C_T_H_W):
@@ -894,18 +893,15 @@ def _training_step_multiview_autoregressive(
 
         if _should_log_frame_debug(iteration):
             log.info(
-                "[self-forcing-ar] iteration=%s chunk=%s/%s latent_frames_per_view=%s "
-                "window=[%s,%s) overlap=%s n_views=%s x0_chunk_shape=%s %s",
-                iteration,
-                chunk_idx + 1,
-                num_chunks,
-                end_frame - start_frame,
-                start_frame,
-                end_frame,
-                overlap,
-                n_views,
-                tuple(x0_chunk.shape),
-                _get_cuda_memory_debug_string(x0_chunk.device),
+                "[self-forcing-ar] "
+                f"iteration={iteration} "
+                f"chunk={chunk_idx + 1}/{num_chunks} "
+                f"latent_frames_per_view={end_frame - start_frame} "
+                f"window=[{start_frame},{end_frame}) "
+                f"overlap={overlap} "
+                f"n_views={n_views} "
+                f"x0_chunk_shape={tuple(x0_chunk.shape)} "
+                f"{_get_cuda_memory_debug_string(x0_chunk.device)}"
             )
 
         if chunk_idx > 0 and prev_generated_x0 is not None:
