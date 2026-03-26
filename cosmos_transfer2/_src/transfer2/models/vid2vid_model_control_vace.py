@@ -367,9 +367,16 @@ class ControlVideo2WorldModel(Video2WorldModel):
                 if data_batch[hint_key].dim() == 5 and data_batch[hint_key].shape[2] > 1:
                     expected_length = self.tokenizer.get_pixel_num_frames(self.config.state_t)
                     original_length = data_batch[hint_key].shape[2]
-                    assert original_length == expected_length, (
-                        "Input control_input length doesn't match expected length specified by state_t."
-                    )
+                    if original_length != expected_length:
+                        log.warning(
+                            "Input %s length (%s) does not match the native state_t=%s chunk length (%s). "
+                            "Allowing a non-native control clip length for downstream chunked processing.",
+                            hint_key,
+                            original_length,
+                            self.config.state_t,
+                            expected_length,
+                            rank0_only=True,
+                        )
 
     def _augment_image_dim_inplace(self, data_batch: dict[str, Tensor], input_key: str = None) -> None:
         super()._augment_image_dim_inplace(data_batch, input_key)
