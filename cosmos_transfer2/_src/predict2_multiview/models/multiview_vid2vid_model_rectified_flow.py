@@ -179,8 +179,8 @@ class MultiviewVid2VidModelRectifiedFlow(Video2WorldModelRectifiedFlow):
         num_video_frames_per_view = int(data_batch["num_video_frames_per_view"].cpu().item())
         n_views = data_batch["view_indices"].shape[1] // num_video_frames_per_view
         view_indices_B_V_T = rearrange(data_batch["view_indices"], "B (V T) -> B V T", V=n_views)
-
-        latent_view_indices_B_V_T = view_indices_B_V_T[:, :, 0 : self.config.state_t]
+        latent_t_per_view = self.tokenizer.get_latent_num_frames(num_video_frames_per_view)
+        latent_view_indices_B_V_T = view_indices_B_V_T[:, :, 0:latent_t_per_view]
         latent_view_indices_B_T = rearrange(latent_view_indices_B_V_T, "B V T -> B (V T)")
         data_batch_with_latent_view_indices = data_batch.copy()
         data_batch_with_latent_view_indices["latent_view_indices_B_T"] = latent_view_indices_B_T
@@ -1015,11 +1015,10 @@ def _run_single_chunk_training_step(
 
 def _get_num_views(data_batch: dict[str, torch.Tensor], condition: Any, state_t: int) -> int:
     view_indices_B_T = getattr(condition, "view_indices_B_T", None)
-    if view_indices_B_T is not None and view_indices_B_T.ndim == 2 and state_t > 0:
-        if view_indices_B_T.shape[1] % state_t == 0:
-            n_views = int(view_indices_B_T.shape[1] // state_t)
-            if n_views > 0:
-                return n_views
+    if view_indices_B_T is not None and view_indices_B_T.ndim == 2:
+        n_views = int(torch.unique(view_indices_B_T[0]).numel())
+        if n_views > 0:
+            return n_views
     sample_n_views = data_batch.get("sample_n_views")
     if isinstance(sample_n_views, torch.Tensor) and sample_n_views.numel() > 0:
         return int(sample_n_views.flatten()[0].item())

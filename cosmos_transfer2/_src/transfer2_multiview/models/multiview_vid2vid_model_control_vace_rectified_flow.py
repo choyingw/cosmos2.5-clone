@@ -171,7 +171,11 @@ class MultiviewControlVideo2WorldModelRectifiedFlow(ControlVideo2WorldModelRecti
         epsilon_B_C_T_H_W: torch.Tensor,
         sigma_B_T: torch.Tensor,
     ):
-        n_views = x0_B_C_T_H_W.shape[2] // self.state_t
+        view_indices_B_T = getattr(condition, "view_indices_B_T", None)
+        if isinstance(view_indices_B_T, torch.Tensor) and view_indices_B_T.ndim == 2:
+            n_views = int(torch.unique(view_indices_B_T[0]).numel())
+        else:
+            n_views = x0_B_C_T_H_W.shape[2] // self.state_t
         x0_B_C_T_H_W = rearrange(x0_B_C_T_H_W, "B C (V T) H W -> (B V) C T H W", V=n_views).contiguous()
         if epsilon_B_C_T_H_W is not None:
             epsilon_B_C_T_H_W = rearrange(epsilon_B_C_T_H_W, "B C (V T) H W -> (B V) C T H W", V=n_views).contiguous()
@@ -202,7 +206,8 @@ class MultiviewControlVideo2WorldModelRectifiedFlow(ControlVideo2WorldModelRecti
         n_views = data_batch["view_indices"].shape[1] // num_video_frames_per_view
         view_indices_B_V_T = rearrange(data_batch["view_indices"], "B (V T) -> B V T", V=n_views)
 
-        latent_view_indices_B_V_T = view_indices_B_V_T[:, :, 0 : self.config.state_t]
+        latent_t_per_view = self.tokenizer.get_latent_num_frames(num_video_frames_per_view)
+        latent_view_indices_B_V_T = view_indices_B_V_T[:, :, 0:latent_t_per_view]
         latent_view_indices_B_T = rearrange(latent_view_indices_B_V_T, "B V T -> B (V T)")
         # data_batch_with_latent_view_indices = data_batch.copy()
         data_batch["latent_view_indices_B_T"] = latent_view_indices_B_T

@@ -198,10 +198,17 @@ class MultiViewCondition(Video2WorldCondition):
         assert len(condition_locations) > 0, "condition_locations must be provided."
         assert state_t is not None, "state_t must be provided."
         assert T > 1, "Image batches are not supported."
-        assert T % state_t == 0, f"T must be a multiple of state_t. Got T={T} and state_t={state_t}."
-        sample_n_views = T // state_t
+        if kwargs["view_indices_B_T"] is not None:
+            sample_n_views = int(torch.unique(kwargs["view_indices_B_T"][0]).numel())
+        else:
+            assert T % state_t == 0, f"T must be a multiple of state_t. Got T={T} and state_t={state_t}."
+            sample_n_views = T // state_t
+        assert T % sample_n_views == 0, (
+            f"T must be divisible by sample_n_views. Got T={T} and sample_n_views={sample_n_views}."
+        )
+        t_per_view = T // sample_n_views
         condition_video_input_mask_B_C_V_T_H_W = torch.zeros(
-            B, 1, sample_n_views, state_t, H, W, dtype=gt_frames.dtype, device=gt_frames.device
+            B, 1, sample_n_views, t_per_view, H, W, dtype=gt_frames.dtype, device=gt_frames.device
         )
         views_eligible_for_dropout = list(range(sample_n_views))
 
@@ -225,7 +232,7 @@ class MultiViewCondition(Video2WorldCondition):
                     f"view_indices_B_T last dimension must be a multiple of sample_n_views. Got view_indices_B_T.shape={kwargs['view_indices_B_T'].shape}, sample_n_views={sample_n_views}"
                 )
                 view_indices = kwargs["view_indices_B_T"]
-                selected_cam_latent_t_index = torch.randint(0, state_t, size=(B,))
+                selected_cam_latent_t_index = torch.randint(0, t_per_view, size=(B,))
                 any_cam_idx_B = view_indices[torch.arange(B), selected_cam_latent_t_index]
             else:
                 any_cam_idx_B = torch.full((B,), condition_cam_idx, dtype=torch.int32)
@@ -377,8 +384,12 @@ class MultiViewCondition(Video2WorldCondition):
 
         kwargs = new_condition.to_dict(skip_underscore=False)
         _, _, T, _, _ = gt_frames_B_C_T_H_W.shape
-        n_views = T // self.state_t
-        assert T % self.state_t == 0, f"T must be a multiple of state_t. Got T={T} and state_t={self.state_t}."
+        if view_indices_B_T is not None:
+            n_views = int(torch.unique(view_indices_B_T[0]).numel())
+        else:
+            n_views = T // self.state_t
+            assert T % self.state_t == 0, f"T must be a multiple of state_t. Got T={T} and state_t={self.state_t}."
+        assert T % n_views == 0, f"T must be divisible by n_views. Got T={T} and n_views={n_views}."
         if process_group is not None:
             if T > 1 and process_group.size() > 1:
                 log.debug(f"Broadcasting {gt_frames_B_C_T_H_W.shape=} to {n_views=} views")

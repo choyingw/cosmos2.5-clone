@@ -86,8 +86,12 @@ class MultiViewControlVideo2WorldCondition(
 
         kwargs = new_condition.to_dict(skip_underscore=False)
         _, _, T, _, _ = gt_frames_B_C_T_H_W.shape
-        n_views = T // self.state_t
-        assert T % self.state_t == 0, f"T must be a multiple of state_t. Got T={T} and state_t={self.state_t}."
+        if view_indices_B_T is not None:
+            n_views = int(torch.unique(view_indices_B_T[0]).numel())
+        else:
+            n_views = T // self.state_t
+            assert T % self.state_t == 0, f"T must be a multiple of state_t. Got T={T} and state_t={self.state_t}."
+        assert T % n_views == 0, f"T must be divisible by n_views. Got T={T} and n_views={n_views}."
 
         if process_group is not None and T > 1 and process_group.size() > 1:
             log.debug(f"Broadcasting multiview control tensors {gt_frames_B_C_T_H_W.shape=} to {n_views=} views")
