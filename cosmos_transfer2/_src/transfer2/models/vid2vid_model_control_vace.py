@@ -369,12 +369,9 @@ class ControlVideo2WorldModel(Video2WorldModel):
                     original_length = data_batch[hint_key].shape[2]
                     if original_length != expected_length:
                         log.warning(
-                            "Input %s length (%s) does not match the native state_t=%s chunk length (%s). "
+                            f"Input {hint_key} length ({original_length}) does not match the native "
+                            f"state_t={self.config.state_t} chunk length ({expected_length}). "
                             "Allowing a non-native control clip length for downstream chunked processing.",
-                            hint_key,
-                            original_length,
-                            self.config.state_t,
-                            expected_length,
                             rank0_only=True,
                         )
 
