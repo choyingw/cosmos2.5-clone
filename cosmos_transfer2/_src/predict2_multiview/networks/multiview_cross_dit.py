@@ -738,12 +738,15 @@ class MultiViewCrossDiT(MinimalV1LVGDiT):
             x_B_C_T_H_W = torch.cat(
                 [x_B_C_T_H_W, padding_mask.unsqueeze(1).repeat(1, 1, x_B_C_T_H_W.shape[2], 1, 1)], dim=1
             )
-        cp_size = (
-            len(get_process_group_ranks(parallel_state.get_context_parallel_group()))
-            if parallel_state.is_initialized()
-            else 1
-        )
-        n_cameras = (x_B_C_T_H_W.shape[2] * cp_size) // self.state_t
+        if view_indices_B_T is not None:
+            n_cameras = int(torch.unique(view_indices_B_T[0]).numel())
+        else:
+            cp_size = (
+                len(get_process_group_ranks(parallel_state.get_context_parallel_group()))
+                if parallel_state.is_initialized()
+                else 1
+            )
+            n_cameras = (x_B_C_T_H_W.shape[2] * cp_size) // self.state_t
         pos_embedder = self.pos_embedder_options[f"n_cameras_{n_cameras}"]  # they are all the same if they are rope
         if self.concat_view_embedding:
             if view_indices_B_T is None:
@@ -777,7 +780,7 @@ class MultiViewCrossDiT(MinimalV1LVGDiT):
         x_B_T_H_W_D = self.x_embedder(x_B_C_T_H_W)
 
         if self.extra_per_block_abs_pos_emb:
-            extra_pos_embedder = self.extra_pos_embedders_options[str(n_cameras)]
+            extra_pos_embedder = self.extra_pos_embedders_options[f"n_cameras_{n_cameras}"]
             extra_pos_emb = extra_pos_embedder(x_B_T_H_W_D, fps=fps)
         else:
             extra_pos_emb = None

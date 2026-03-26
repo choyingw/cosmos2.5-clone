@@ -566,11 +566,14 @@ class MultiViewControlDiT(MinimalV4LVGControlVaceDiT):
             )
         if not USE_MEGATRON:
             raise ImportError("No megatron.core package found, which is required for Multiview model inference.")
-        process_group = parallel_state.get_context_parallel_group()
-        cp_size = len(get_process_group_ranks(process_group))
-        if USE_MEGATRON and hasattr(parallel_state, "cp_size_t"):
-            cp_size = parallel_state.cp_size_t
-        n_cameras = (x_B_C_T_H_W.shape[2] * cp_size) // self.state_t
+        if view_indices_B_T is not None:
+            n_cameras = int(torch.unique(view_indices_B_T[0]).numel())
+        else:
+            process_group = parallel_state.get_context_parallel_group()
+            cp_size = len(get_process_group_ranks(process_group))
+            if USE_MEGATRON and hasattr(parallel_state, "cp_size_t"):
+                cp_size = parallel_state.cp_size_t
+            n_cameras = (x_B_C_T_H_W.shape[2] * cp_size) // self.state_t
         pos_embedder = self.pos_embedder_options[f"n_cameras_{n_cameras}"]
         if self.concat_view_embedding:
             if view_indices_B_T is None:
@@ -604,7 +607,7 @@ class MultiViewControlDiT(MinimalV4LVGControlVaceDiT):
         x_B_T_H_W_D = self.x_embedder(x_B_C_T_H_W)
 
         if self.extra_per_block_abs_pos_emb:
-            extra_pos_embedder = self.extra_pos_embedders_options[str(n_cameras)]
+            extra_pos_embedder = self.extra_pos_embedders_options[f"n_cameras_{n_cameras}"]
             extra_pos_emb = extra_pos_embedder(x_B_T_H_W_D, fps=fps)
         else:
             extra_pos_emb = None
@@ -636,11 +639,14 @@ class MultiViewControlDiT(MinimalV4LVGControlVaceDiT):
             )
 
         # Determine number of cameras
-        process_group = parallel_state.get_context_parallel_group()
-        cp_size = len(get_process_group_ranks(process_group))
-        if USE_MEGATRON and hasattr(parallel_state, "cp_size_t"):
-            cp_size = parallel_state.cp_size_t
-        n_cameras = (control_B_C_T_H_W.shape[2] * cp_size) // self.state_t
+        if view_indices_B_T is not None:
+            n_cameras = int(torch.unique(view_indices_B_T[0]).numel())
+        else:
+            process_group = parallel_state.get_context_parallel_group()
+            cp_size = len(get_process_group_ranks(process_group))
+            if USE_MEGATRON and hasattr(parallel_state, "cp_size_t"):
+                cp_size = parallel_state.cp_size_t
+            n_cameras = (control_B_C_T_H_W.shape[2] * cp_size) // self.state_t
         pos_embedder = self.pos_embedder_options[f"n_cameras_{n_cameras}"]
 
         if self.concat_view_embedding:

@@ -360,7 +360,9 @@ class MultiViewCrossControlDiT(MultiViewCrossDiT):
             )
 
         # Determine number of cameras
-        if parallel_state.is_initialized():
+        if view_indices_B_T is not None:
+            n_cameras = int(torch.unique(view_indices_B_T[0]).numel())
+        elif parallel_state.is_initialized():
             process_group = parallel_state.get_context_parallel_group()
             cp_size = len(get_process_group_ranks(process_group))
             n_cameras = (control_B_C_T_H_W.shape[2] * cp_size) // self.state_t
