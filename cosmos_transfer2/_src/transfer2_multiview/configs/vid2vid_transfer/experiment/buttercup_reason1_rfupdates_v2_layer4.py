@@ -30,13 +30,15 @@ torchrun --nproc_per_node=8 --master_port=12341 -m scripts.train --config=cosmos
 def buttercup_transfer2p5_2b_mv_7views_res720p_fps10_t8_fromfinetuned12knofpsuniform_mads720pmulticaps29frames_world_scenario_nofps_uniform() -> (
     dict
 ):
-    state_t = 8  # 29 pixel frames per chunk for Wan tokenizer
+    state_t = 4  # 13 pixel frames per AR chunk for Wan tokenizer
     text_encoder_ckpt_path = "s3://bucket/cosmos_reasoning1/sft_exp700/sft_exp721-1_qwen7b_tl_721_5vs5_s3_balanced_n32_resume_16k/checkpoints/iter_000016000/model/"
     base_load_path = "bucket/cosmos_predict2_multiview/cosmos2_mv/buttercup_predict2p5_2b_7views_res720p_fps30_t8_joint_alpamayo1capviewprefix_allcapsviewprefix_29frames_nofps_uniform_dropoutt0-0/checkpoints/iter_000012000/"
     base_load_credentials = "credentials/s3_checkpoint.secret"
 
     return dict(
         defaults=[
+            # Keep 29-frame clips so Wan encodes 8 latent frames per view; with state_t=4
+            # and overlap=2, self-forcing trains 3 AR chunks of 13 pixel frames each.
             {"override /data_train": "video_control_mads_multiview_0823_s3_720p_10fps_29frames_7views"},
             {"override /model": "fsdp_rectified_flow_multiview_control"},
             {"override /net": "cosmos_v1_2B_multiview_control"},
@@ -82,7 +84,9 @@ def buttercup_transfer2p5_2b_mv_7views_res720p_fps10_t8_fromfinetuned12knofpsuni
             cycle_lengths=[100_000],
         ),
         model_parallel=dict(
-            context_parallel_size=8,
+            # state_t=4 can be split temporally by CP=4. CP=8 would require an
+            # additional spatial split, which can fall through to unsupported width splitting at 720p.
+            context_parallel_size=4,
         ),
         model=dict(
             config=dict(
@@ -94,13 +98,14 @@ def buttercup_transfer2p5_2b_mv_7views_res720p_fps10_t8_fromfinetuned12knofpsuni
                 conditional_frames_probs={0: 0.5, 1: 0.25, 2: 0.25},
                 state_t=state_t,
                 self_forcing_enabled=True,
-                self_forcing_prob=0.2,
+                self_forcing_prob=0.5,
                 self_forcing_warmup_iter=1_000,
                 self_forcing_ramp_iters=5_000,
                 self_forcing_use_ema_teacher=False,
                 self_forcing_autoregressive=True,
                 self_forcing_chunk_overlap=2,
                 self_forcing_detach_rollout=True,
+                self_forcing_max_rollout_chunks=3,
                 online_text_embeddings_as_dict=False,
                 fsdp_shard_size=8,
                 resolution="720p",
