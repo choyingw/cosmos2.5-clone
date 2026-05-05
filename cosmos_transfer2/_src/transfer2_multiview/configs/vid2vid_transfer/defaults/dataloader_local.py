@@ -39,9 +39,9 @@ class MultiviewTransferDataset(LocalMultiViewDataset):
         self.augmentation_config = augmentation_config
         self.folder_to_camera_key = folder_to_camera_key
         self.camera_key_to_folder = {v: k for k, v in folder_to_camera_key.items()}
-        assert len(self.camera_key_to_folder) == len(self.folder_to_camera_key), (
-            "camera_key_to_folder and folder_to_camera_key must have the same length!"
-        )
+        assert len(self.camera_key_to_folder) == len(
+            self.folder_to_camera_key
+        ), "camera_key_to_folder and folder_to_camera_key must have the same length!"
 
         dataset_path = Path(dataset_dir)
         if not dataset_path.exists():
@@ -114,7 +114,7 @@ def register_dataloader_local() -> None:
     augmentation_config = L(AugmentationConfig)(
         resolution_hw=(720, 1280),
         fps_downsample_factor=1,
-        num_video_frames=29,
+        num_video_frames=30,
         camera_keys=DEFAULT_CAMERAS if not SMOKE else DEFAULT_CAMERAS[:1],
         camera_view_mapping=DEFAULT_CAMERA_VIEW_MAPPING,
         camera_video_key_mapping=DEFAULT_VIDEO_KEY_MAPPING,
@@ -127,7 +127,7 @@ def register_dataloader_local() -> None:
     )
 
     dataset = L(MultiviewTransferDataset)(
-        dataset_dir="assets/multiview_hdmap_posttrain_dataset",
+        dataset_dir="sample_sf",
         augmentation_config=augmentation_config,
         folder_to_camera_key={f"ftheta_{camera_name}": camera_name for camera_name in DEFAULT_CAMERAS},
     )

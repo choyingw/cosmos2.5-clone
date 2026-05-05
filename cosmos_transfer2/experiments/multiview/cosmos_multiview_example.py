@@ -98,7 +98,7 @@ transfer2_auto_multiview_post_train_example_self_forcing = dict(
         name="2b_cosmos_multiview_post_train_example_self_forcing",
     ),
     checkpoint=dict(
-        save_iter=200,
+        save_iter=15,
         # pyrefly: ignore  # missing-attribute
         load_path=get_checkpoint_path(DEFAULT_CHECKPOINT.s3.uri),
         load_training_state=False,
