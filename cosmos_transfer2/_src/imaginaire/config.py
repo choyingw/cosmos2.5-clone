@@ -278,6 +278,8 @@ class CheckpointConfig:
     load_path: str = ""
     # Whether to load the training states (optimizer/scheduler/grad-scaler) from the checkpoint path.
     load_training_state: bool = False
+    # Whether to save the training states (optimizer/scheduler/grad-scaler) in periodic checkpoints.
+    save_training_state: bool = True
     # Whether to load the scheduler state only from the checkpoint path. If load_training_state is True, this will be ignored.
     only_load_scheduler_state: bool = False
     # Load state_dict to the models in strict mode.

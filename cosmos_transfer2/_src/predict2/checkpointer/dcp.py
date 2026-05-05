@@ -443,6 +443,11 @@ def save_checkpoint_in_background(
 class DistributedCheckpointer(AbstractCheckpointer):
     KEYS_TO_SAVE = ["model", "optim", "scheduler", "trainer"]
 
+    def keys_to_save(self) -> List[str]:
+        if self.config_checkpoint.save_training_state:
+            return self.KEYS_TO_SAVE
+        return ["model"]
+
     def __init__(
         self,
         config_checkpoint: CheckpointConfig,
@@ -488,7 +493,7 @@ class DistributedCheckpointer(AbstractCheckpointer):
         if latest_checkpoint_file is not None:
             # 1. Resume training from latest_checkpoint.txt under the same name.
             checkpoint_path = os.path.join(self.load_dirname, latest_checkpoint_file)
-            resume_keys.extend(self.KEYS_TO_SAVE)
+            resume_keys.extend(self.keys_to_save())
         else:
             if self.load_path and not str(self.load_path).endswith(".pt"):
                 # 2. Load the module weights specified by config_checkpoint.path.
@@ -720,13 +725,20 @@ class DistributedCheckpointer(AbstractCheckpointer):
         checkpoint_file = f"iter_{iteration:09}"
         to_save_dict = {
             "model": ModelWrapper(model).state_dict(),
-            "optim": OptimizerWrapper(model, optimizer).state_dict(),
-            "scheduler": scheduler.state_dict(),
-            "trainer": {
-                "grad_scaler": grad_scaler.state_dict(),
-                "iteration": iteration,
-            },
         }
+        if self.config_checkpoint.save_training_state:
+            to_save_dict.update(
+                {
+                    "optim": OptimizerWrapper(model, optimizer).state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "trainer": {
+                        "grad_scaler": grad_scaler.state_dict(),
+                        "iteration": iteration,
+                    },
+                }
+            )
+        else:
+            log.critical("Saving model-only checkpoint because checkpoint.save_training_state=False")
         for k in to_save_dict.keys():
             output_dirname = os.path.join(self.save_dirname, f"iter_{iteration:09}/{k}")
             to_save_dict[k] = (to_save_dict[k], output_dirname)

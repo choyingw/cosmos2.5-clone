@@ -63,6 +63,7 @@ def buttercup_transfer2p5_2b_mv_7views_res720p_fps10_t8_fromfinetuned12knofpsuni
         ),
         checkpoint=dict(
             save_iter=500,
+            save_training_state=False,
             load_path="",
             load_from_object_store=dict(
                 enabled=True,
