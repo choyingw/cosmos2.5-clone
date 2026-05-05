@@ -17,6 +17,7 @@ import functools
 import inspect
 import os
 import signal
+import time
 
 import torch
 import torch.distributed as dist
@@ -134,6 +135,7 @@ class ImaginaireTrainer:
             )
         # Initialize the timer for speed benchmarking.
         self.training_timer = misc.TrainingTimer()
+        self._last_gpu_memory_log_time = 0.0
         # Initialize Straggler Detection
         self.straggler_detector = StragglerDetectorV2(
             enabled=self.config.trainer.straggler_detection.enabled,
@@ -145,6 +147,31 @@ class ImaginaireTrainer:
         self.straggler_detector.initialize()
         # Send a TimeoutError if a training step takes over timeout_period seconds.
         signal.signal(signal.SIGALRM, functools.partial(misc.timeout_handler, config.trainer.timeout_period))  # type: ignore
+
+    def _maybe_log_gpu_memory(self, iteration: int, interval_seconds: float = 30.0) -> None:
+        if not torch.cuda.is_available():
+            return
+        now = time.monotonic()
+        if now - self._last_gpu_memory_log_time < interval_seconds:
+            return
+        self._last_gpu_memory_log_time = now
+
+        device = torch.cuda.current_device()
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        bytes_per_gib = 1024**3
+        log.info(
+            "GPU peak "
+            f"iter={iteration} "
+            f"rank={distributed.get_rank()}/{distributed.get_world_size()} "
+            f"device={device} "
+            f"alloc={torch.cuda.memory_allocated(device) / bytes_per_gib:.2f}GiB "
+            f"reserved={torch.cuda.memory_reserved(device) / bytes_per_gib:.2f}GiB "
+            f"peak_alloc={torch.cuda.max_memory_allocated(device) / bytes_per_gib:.2f}GiB "
+            f"peak_reserved={torch.cuda.max_memory_reserved(device) / bytes_per_gib:.2f}GiB "
+            f"free={free_bytes / bytes_per_gib:.2f}GiB "
+            f"total={total_bytes / bytes_per_gib:.2f}GiB",
+            rank0_only=False,
+        )
 
     def train(
         self,
@@ -242,6 +269,7 @@ class ImaginaireTrainer:
                     if iteration % self.config.checkpoint.save_iter == 0:
                         self.checkpointer.save(model, optimizer, scheduler, grad_scaler, iteration=iteration)
                     self.callbacks.on_training_step_end(model, data_batch, output_batch, loss, iteration=iteration)
+                    self._maybe_log_gpu_memory(iteration)
                     # Validation.
                     if self.config.trainer.run_validation and iteration % self.config.trainer.validation_iter == 0:
                         self.validate(model, dataloader_val, iteration=iteration)

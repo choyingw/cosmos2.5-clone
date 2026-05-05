@@ -200,7 +200,7 @@ class JobConfig:
 
     @property
     def path_local(self) -> str:
-        local_root = os.environ.get("IMAGINAIRE_OUTPUT_ROOT", "/tmp/imaginaire4-output")
+        local_root = os.environ.get("IMAGINAIRE_OUTPUT_ROOT", "./outputs")
         return f"{local_root}/{self.path}"
 
 

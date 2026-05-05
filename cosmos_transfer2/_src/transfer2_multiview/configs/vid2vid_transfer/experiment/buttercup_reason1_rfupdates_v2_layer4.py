@@ -105,7 +105,7 @@ def buttercup_transfer2p5_2b_mv_7views_res720p_fps10_t8_fromfinetuned12knofpsuni
                 self_forcing_autoregressive=True,
                 self_forcing_chunk_overlap=2,
                 self_forcing_detach_rollout=True,
-                self_forcing_max_rollout_chunks=3,
+                self_forcing_max_rollout_chunks=2,
                 online_text_embeddings_as_dict=False,
                 fsdp_shard_size=8,
                 resolution="720p",
