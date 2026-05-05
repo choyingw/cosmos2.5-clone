@@ -113,8 +113,8 @@ transfer2_auto_multiview_post_train_example_self_forcing = dict(
     model=dict(
         config=dict(
             base_load_from=None,
-            # Keep the original 29-frame chunk size in latent space.
-            state_t=8,
+            # 13 pixel frames per AR chunk for Wan tokenizer.
+            state_t=4,
             self_forcing_enabled=True,
             self_forcing_prob=0.2,
             self_forcing_warmup_iter=100,
@@ -123,8 +123,9 @@ transfer2_auto_multiview_post_train_example_self_forcing = dict(
             self_forcing_autoregressive=True,
             self_forcing_chunk_overlap=2,
             self_forcing_detach_rollout=True,
+            self_forcing_max_rollout_chunks=2,
             net=dict(
-                state_t=8,
+                state_t=4,
             ),
         ),
     ),
@@ -170,9 +171,10 @@ transfer2_auto_multiview_post_train_example_self_forcing = dict(
         dataset=dict(
             dataset_dir="sample_sf",
             augmentation_config=dict(
-                # With state_t=8 and overlap=2, 61 pixel frames gives about 16 latent frames:
-                # 3 chunks total and 2 rollout opportunities.
-                num_video_frames=61,
+                # 29 pixel frames gives 8 latent frames per view; with state_t=4
+                # and overlap=2, AR has up to 3 chunks, capped to 2 above.
+                num_video_frames=29,
+                sample_random_consecutive_frames_from_full_video=True,
                 single_caption_camera_name="camera_front_wide_120fov",
                 add_view_prefix_to_caption=True,
             ),

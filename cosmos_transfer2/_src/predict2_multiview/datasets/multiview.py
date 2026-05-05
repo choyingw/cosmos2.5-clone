@@ -113,6 +113,7 @@ class ExtractFramesAndCaptions(Augmentor):
         camera_prefix_mapping: Optional[dict[CameraKeyType, str]] = None,
         single_caption_camera_name: Optional[CameraKeyType] = None,
         window_random_frame_offset_range: Optional[tuple[int, int]] = None,
+        sample_random_consecutive_frames_from_full_video: bool = False,
     ) -> None:
         """Extracts frames and captions from video/metadata dicts.
 
@@ -131,6 +132,8 @@ class ExtractFramesAndCaptions(Augmentor):
             single_caption_camera_name: Name of the camera key to use for single caption conditioning.
                 If `add_view_prefix_to_caption` is True, will still provide prefixes for other views.
             window_random_frame_offset_range: Optional range of random offset to add to the start frame of the extracted window.
+            sample_random_consecutive_frames_from_full_video: If True, ignore caption-window frame boundaries and sample
+                a random consecutive frame window from the full video length.
 
         Returns:
             data: Dictionary with resized tensors of frames and captions
@@ -149,6 +152,7 @@ class ExtractFramesAndCaptions(Augmentor):
         self.camera_prefix_mapping = camera_prefix_mapping
         self.single_caption_camera_name = single_caption_camera_name
         self.window_random_frame_offset_range = window_random_frame_offset_range
+        self.sample_random_consecutive_frames_from_full_video = sample_random_consecutive_frames_from_full_video
 
         if self.add_view_prefix_to_caption and self.camera_prefix_mapping is None:
             raise ValueError("camera_prefix_mapping is required when add_view_prefix_to_caption is True")
@@ -171,6 +175,11 @@ class ExtractFramesAndCaptions(Augmentor):
             )
 
         if self.window_random_frame_offset_range is not None:
+            if self.sample_random_consecutive_frames_from_full_video:
+                raise ValueError(
+                    "`window_random_frame_offset_range` cannot be used with "
+                    "`sample_random_consecutive_frames_from_full_video`"
+                )
             start_range, end_range = self.window_random_frame_offset_range
             if start_range < 0 or end_range < 0:
                 raise ValueError("`window_random_frame_offset_range` must be non-negative")
@@ -198,6 +207,19 @@ class ExtractFramesAndCaptions(Augmentor):
             [],
             [],
         )
+
+        random_full_video_frame_start = None
+        if self.sample_random_consecutive_frames_from_full_video:
+            min_num_frames = self._get_min_num_frames_across_views(data)
+            required_span = (self.num_frames - 1) * self.fps_downsample_factor + 1
+            max_start_frame = min_num_frames - required_span
+            if max_start_frame < 0:
+                log.error(
+                    f"Video is too short for random consecutive sampling: "
+                    f"min_num_frames={min_num_frames}, required_span={required_span}"
+                )
+                return None
+            random_full_video_frame_start = random.randint(0, max_start_frame)
 
         for camera_name in self.camera_order:
             video_key = self.camera_video_key_mapping[camera_name]
@@ -228,10 +250,13 @@ class ExtractFramesAndCaptions(Augmentor):
             captions.append(caption)
 
             # extract frames
-            random_offset = 0
-            if self.window_random_frame_offset_range is not None:
-                random_offset = random.randint(*self.window_random_frame_offset_range)
-            frame_start = window["start_frame"] + random_offset
+            if random_full_video_frame_start is not None:
+                frame_start = random_full_video_frame_start
+            else:
+                random_offset = 0
+                if self.window_random_frame_offset_range is not None:
+                    random_offset = random.randint(*self.window_random_frame_offset_range)
+                frame_start = window["start_frame"] + random_offset
             frame_end = frame_start + self.num_frames * self.fps_downsample_factor
             frame_indices = list(range(frame_start, frame_end, self.fps_downsample_factor))
             try:
@@ -309,6 +334,25 @@ class ExtractFramesAndCaptions(Augmentor):
         if self.camera_control_key_mapping is not None:
             sample["control_input_hdmap_bbox"] = rearrange(torch.cat(multiview_control, dim=0), "t c h w -> c t h w")
         return sample
+
+    def _get_min_num_frames_across_views(self, data: dict[str, Any]) -> int:
+        num_frames = []
+        for camera_name in self.camera_order:
+            video_key = self.camera_video_key_mapping[camera_name]
+            num_frames.append(self.get_video_num_frames(data[video_key]))
+            if self.camera_control_key_mapping is not None:
+                control_key = self.camera_control_key_mapping[camera_name]
+                num_frames.append(self.get_video_num_frames(data[control_key]))
+        return min(num_frames)
+
+    @staticmethod
+    def get_video_num_frames(video: bytes) -> int:
+        """Return number of frames in a video byte stream."""
+
+        from decord import VideoReader
+
+        video_reader = VideoReader(io.BytesIO(video))
+        return len(video_reader)
 
     @staticmethod
     def extract_frames(
@@ -436,6 +480,7 @@ class AugmentationConfig:
     camera_prefix_mapping: Optional[dict[CameraKeyType, str]] = DEFAULT_CAPTION_PREFIXES
     single_caption_camera_name: Optional[CameraKeyType] = None
     window_random_frame_offset_range: Optional[tuple[int, int]] = None
+    sample_random_consecutive_frames_from_full_video: bool = False
 
     def __attrs_post_init__(self) -> None:
         """Post initialization checks for camera keys consistency."""
@@ -482,6 +527,9 @@ def make_augmentations(augmentation_config: AugmentationConfig) -> tuple[dict[st
         camera_prefix_mapping=augmentation_config.camera_prefix_mapping,
         single_caption_camera_name=augmentation_config.single_caption_camera_name,
         window_random_frame_offset_range=augmentation_config.window_random_frame_offset_range,
+        sample_random_consecutive_frames_from_full_video=(
+            augmentation_config.sample_random_consecutive_frames_from_full_video
+        ),
     )
 
     # define dataset keys to load

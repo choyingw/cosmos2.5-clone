@@ -114,7 +114,8 @@ def register_dataloader_local() -> None:
     augmentation_config = L(AugmentationConfig)(
         resolution_hw=(720, 1280),
         fps_downsample_factor=1,
-        num_video_frames=40,
+        num_video_frames=29,
+        sample_random_consecutive_frames_from_full_video=True,
         camera_keys=DEFAULT_CAMERAS if not SMOKE else DEFAULT_CAMERAS[:1],
         camera_view_mapping=DEFAULT_CAMERA_VIEW_MAPPING,
         camera_video_key_mapping=DEFAULT_VIDEO_KEY_MAPPING,
