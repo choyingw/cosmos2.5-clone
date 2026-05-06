@@ -115,6 +115,30 @@ def _num_conditional_frames_for_batch(
     return tokenizer.get_latent_num_frames(chunk_overlap)
 
 
+def pixel_frames_from_latent_frames(tokenizer, latent_frames: int) -> int:
+    """Convert latent-frame count to the matching raw pixel-frame span."""
+    latent_frames = int(latent_frames)
+    if latent_frames <= 0:
+        return 0
+    return int(tokenizer.get_pixel_num_frames(latent_frames))
+
+
+def resolve_autoregressive_pixel_overlap(model, pixel_overlap: int | None, latent_overlap: int | None) -> int:
+    """Resolve AR overlap in pixel frames, defaulting to the model's trained latent overlap."""
+    if pixel_overlap is not None:
+        return int(pixel_overlap)
+    if latent_overlap is None:
+        latent_overlap = int(getattr(model.config, "self_forcing_chunk_overlap", 0))
+    return pixel_frames_from_latent_frames(model.tokenizer, latent_overlap)
+
+
+def resolve_autoregressive_max_chunks(model, max_chunks: int | None) -> int:
+    """Resolve the AR rollout cap. Zero means no cap."""
+    if max_chunks is not None:
+        return int(max_chunks)
+    return int(getattr(model.config, "self_forcing_max_rollout_chunks", 0))
+
+
 class ControlVideo2WorldInference:
     """
     Handles the Vid2Vid inference process, including model loading, data preparation,
@@ -240,6 +264,8 @@ class ControlVideo2WorldInference:
         num_conditional_frames: int | list[int],
         num_steps: int,
         use_negative_prompt: bool,
+        max_chunks: int = 0,
+        control_key: str | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Generate video using autoregressive sliding window approach.
@@ -254,6 +280,8 @@ class ControlVideo2WorldInference:
             num_conditional_frames: Number of conditional pixel frames (scalar or per-view list)
             num_steps: Number of sampling steps for the model.
             use_negative_prompt: Whether to use default negative prompt.
+            max_chunks: Maximum number of AR chunks to generate. Zero means no cap.
+            control_key: Batch key for the control input. If not provided, inferred from the batch.
 
         Returns:
             Tuple of (generated video tensor, control video tensor)
@@ -263,7 +291,12 @@ class ControlVideo2WorldInference:
             raise ValueError("num_conditional_frames should be passed as an argument")
 
         # Extract full video and control tensors
-        full_control = full_batch["control_input_hdmap_bbox"]  # Shape: [1, 3, total_frames, H, W]
+        if control_key is None:
+            control_keys = [key for key in full_batch if key.startswith("control_input_")]
+            if len(control_keys) != 1:
+                raise ValueError(f"Expected exactly one control_input_* key, found {control_keys}")
+            control_key = control_keys[0]
+        full_control = full_batch[control_key]  # Shape: [1, 3, total_frames, H, W]
         batch_size, channels, total_frames, height, width = full_batch[
             "video"
         ].shape  # Shape: [1, 3, total_frames, H, W]
@@ -280,10 +313,17 @@ class ControlVideo2WorldInference:
 
         # Calculate number of chunks needed
         effective_chunk_size = chunk_size - overlap
+        if effective_chunk_size <= 0:
+            raise ValueError(f"chunk_overlap={overlap} must be smaller than chunk_size={chunk_size}")
         num_chunks = max(1, (frames_per_view - overlap + effective_chunk_size - 1) // effective_chunk_size)
+        if max_chunks > 0:
+            num_chunks = min(num_chunks, int(max_chunks))
 
         if self.rank0:
-            logger.info(f"Generating {num_chunks} chunks with overlap {overlap}")
+            logger.info(
+                f"Generating {num_chunks} chunks with chunk_size={chunk_size}, overlap={overlap}, "
+                f"effective_step={effective_chunk_size}, max_chunks={max_chunks}"
+            )
 
         # Generate first chunk using original input videos
         current_input_video = full_batch["video"].clone()
@@ -302,7 +342,7 @@ class ControlVideo2WorldInference:
 
             # Create chunk batch (extract 29-frame window from full video)
             chunk_batch = self._create_chunk_batch(
-                full_batch, current_input_video, full_control, start_frame, end_frame, n_views
+                full_batch, current_input_video, full_control, start_frame, end_frame, n_views, control_key
             )
 
             chunk_batch["num_conditional_frames"] = _num_conditional_frames_for_batch(
@@ -366,6 +406,7 @@ class ControlVideo2WorldInference:
         start_frame: int,
         end_frame: int,
         n_views: int,
+        control_key: str = "control_input_hdmap_bbox",
     ) -> dict[str, torch.Tensor]:
         """
         Create a batch for a specific chunk by extracting a start_frame:end_frame window from each view.
@@ -385,7 +426,7 @@ class ControlVideo2WorldInference:
 
         # Copy non-video fields from original batch
         for key, value in original_batch.items():
-            if key not in ["video", "control_input_hdmap_bbox"]:
+            if key not in ["video", control_key]:
                 chunk_batch[key] = value
 
         # Calculate frames per view in the full video
@@ -400,7 +441,7 @@ class ControlVideo2WorldInference:
         control_video_chunk = einops.rearrange(control_video_chunk, "N V C T H W -> N C (V T) H W")
         view_indices_chunk = einops.rearrange(view_indices_chunk, "N V T -> N (V T)")
         chunk_batch["video"] = input_video_chunk.clone()
-        chunk_batch["control_input_hdmap_bbox"] = control_video_chunk.clone()
+        chunk_batch[control_key] = control_video_chunk.clone()
         chunk_batch["num_video_frames_per_view"] = torch.tensor(
             [
                 end_frame - start_frame,
@@ -434,17 +475,20 @@ class ControlVideo2WorldInference:
         update_end = end_frame
         gen_view_start = overlap
         gen_view_end = chunk_frames_per_view
-        actual_update_end = min(update_end, current_input.shape[2])
         actual_gen_end = gen_view_end
 
+        current_input_NVCTHW = einops.rearrange(current_input.clone(), "N C (V T) H W -> N V C T H W", V=n_views)
+        actual_update_end = min(update_end, current_input_NVCTHW.shape[3])
         frames_to_copy = min(actual_update_end - update_start, actual_gen_end - gen_view_start)
         if self.rank0:
             logger.info(f"Frames to copy: {frames_to_copy}")
             logger.info(f"Update start: {update_start}, Update end: {update_end}")
             logger.info(f"Gen view start: {gen_view_start}, Gen view end: {gen_view_end}")
-        current_input_NVCTHW = einops.rearrange(current_input.clone(), "N C (V T) H W -> N V C T H W", V=n_views)
         generated_chunk_NVCTHW = generated_chunk.unsqueeze(0)
-        generated_chunk_NVCTHW = (generated_chunk_NVCTHW * 255.0).to(current_input.dtype)
+        generated_chunk_NVCTHW = (generated_chunk_NVCTHW * 255.0).to(
+            device=current_input_NVCTHW.device,
+            dtype=current_input.dtype,
+        )
 
         current_input_NVCTHW[:, :, :, update_start : update_start + frames_to_copy] = generated_chunk_NVCTHW[
             :, :, :, gen_view_start : gen_view_start + frames_to_copy

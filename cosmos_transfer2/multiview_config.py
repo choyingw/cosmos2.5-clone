@@ -107,10 +107,31 @@ class MultiviewInferenceArguments(CommonInferenceArguments):
         description="Number of chunks to process auto-regressively",
     )
     """Number of frames the model generates per view in a single forward pass (chunk size, typically 29 or 61)."""
-    chunk_overlap: int = pydantic.Field(
-        default=1, description="Number of overlapping frames between consecutive chunks"
+    chunk_overlap: int | None = pydantic.Field(
+        default=None,
+        description=(
+            "Number of overlapping pixel frames between consecutive chunks. If omitted, inference uses "
+            "model.config.self_forcing_chunk_overlap when available, otherwise falls back to 1 pixel frame."
+        ),
     )
-    """Number of overlapping frames between consecutive chunks for temporal consistency."""
+    """Number of overlapping pixel frames between consecutive chunks for temporal consistency."""
+    chunk_overlap_latent: int | None = pydantic.Field(
+        default=None,
+        description=(
+            "Number of overlapping latent frames between consecutive chunks. Overrides "
+            "model.config.self_forcing_chunk_overlap when provided."
+        ),
+    )
+    """Number of overlapping latent frames between consecutive chunks."""
+    max_ar_chunks: int | None = pydantic.Field(
+        default=None,
+        ge=0,
+        description=(
+            "Maximum number of autoregressive chunks to generate. If omitted, inference uses "
+            "model.config.self_forcing_max_rollout_chunks when available; 0 means no cap."
+        ),
+    )
+    """Maximum number of autoregressive chunks to generate."""
 
     save_combined_views: bool = True
     """Save a single concatenated video containing all views side-by-side. If False, saves individual split views and a grid view."""

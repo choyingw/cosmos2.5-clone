@@ -181,6 +181,21 @@ PYTHONPATH=. torchrun --nproc_per_node=8 --master_port=12341 -m cosmos_transfer2
     --save_each_view \
     model.config.base_load_from=null
 
+# self-forcing AR checkpoint, using the model's state_t / overlap / max-chunks settings
+EXP=transfer2_auto_multiview_post_train_example_self_forcing
+PYTHONPATH=. torchrun --nproc_per_node=8 --master_port=12341 -m cosmos_transfer2._src.transfer2_multiview.inference.inference_cli \
+    --experiment ${EXP} \
+    --ckpt_path ./outputs/cosmos_transfer_v2p5/auto_multiview/2b_cosmos_multiview_post_train_example_self_forcing/checkpoints/iter_000000002 \
+    --context_parallel_size 8 \
+    --input_root sample_sf \
+    --num_conditional_frames 1 \
+    --guidance 3.0 \
+    --save_root results/transfer2_multiview_self_forcing_ar/ \
+    --max_samples 1 --target_frames 29 --target_height 720 --target_width 1280 \
+    --use_autoregressive \
+    --stack_mode grid \
+    model.config.base_load_from=null
+
 # agibot
 # depth control
 EXP=transfer2p5_2b_mv3_res720p_t24_frombase2p5_agibot_captionprefix_tni2v_depth
@@ -245,7 +260,11 @@ from cosmos_transfer2._src.predict2_multiview.scripts.mv_visualize_helper import
     save_each_view_separately,
 )
 from cosmos_transfer2._src.transfer2.datasets.augmentors.control_input import AddControlInputBlur, AddControlInputEdge
-from cosmos_transfer2._src.transfer2_multiview.inference.inference import ControlVideo2WorldInference
+from cosmos_transfer2._src.transfer2_multiview.inference.inference import (
+    ControlVideo2WorldInference,
+    resolve_autoregressive_max_chunks,
+    resolve_autoregressive_pixel_overlap,
+)
 
 NUM_CONDITIONAL_FRAMES_KEY = "num_conditional_frames"
 
@@ -470,6 +489,15 @@ def load_multiview_captions(
         return [DEFAULT_DRIVING_SCENE_PROMPT] * len(camera_order)
 
     captions = []
+    fallback_caption_path = None
+    for fallback_camera in ("camera_front_wide_120fov", camera_order[0]):
+        for fallback_sub_dir in (f"ftheta_{fallback_camera}", fallback_camera):
+            candidate = captions_dir / fallback_sub_dir / f"{video_id}.txt"
+            if candidate.exists():
+                fallback_caption_path = candidate
+                break
+        if fallback_caption_path is not None:
+            break
 
     for camera in camera_order:
         if (captions_dir / f"ftheta_{camera}").exists():
@@ -477,13 +505,35 @@ def load_multiview_captions(
         elif (captions_dir / camera).exists():
             sub_dir = camera
         else:
-            raise FileNotFoundError(f"Folder not found: {captions_dir / f'ftheta_{camera}'} or {captions_dir / camera}")
+            if fallback_caption_path is None:
+                log.warning(
+                    f"Caption folder not found for {camera}; using default driving scene prompt for this view."
+                )
+                caption = DEFAULT_DRIVING_SCENE_PROMPT
+                if add_camera_prefix and camera in camera_to_caption_prefix:
+                    caption = f"{camera_to_caption_prefix[camera]} {caption}"
+                captions.append(caption)
+                continue
+            caption_path = fallback_caption_path
+            with open(caption_path, "r", encoding="utf-8") as f:
+                caption = f.read().strip()
+            if add_camera_prefix and camera in camera_to_caption_prefix:
+                caption = f"{camera_to_caption_prefix[camera]} {caption}"
+            captions.append(caption)
+            continue
 
         caption_filename = f"{sub_dir}/{video_id}.txt"
         caption_path = captions_dir / caption_filename
 
         if not caption_path.exists():
-            raise FileNotFoundError(f"Caption file not found: {caption_path}")
+            if fallback_caption_path is None:
+                log.warning(f"Caption file not found: {caption_path}. Using default prompt for this view.")
+                caption = DEFAULT_DRIVING_SCENE_PROMPT
+                if add_camera_prefix and camera in camera_to_caption_prefix:
+                    caption = f"{camera_to_caption_prefix[camera]} {caption}"
+                captions.append(caption)
+                continue
+            caption_path = fallback_caption_path
 
         with open(caption_path, "r", encoding="utf-8") as f:
             caption = f.read().strip()
@@ -653,8 +703,26 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--chunk_overlap",
         type=int,
-        default=1,
-        help="Number of overlapping frames between chunks in autoregressive generation",
+        default=None,
+        help=(
+            "Number of overlapping pixel frames between chunks in autoregressive generation. "
+            "If omitted, this is derived from model.config.self_forcing_chunk_overlap."
+        ),
+    )
+    parser.add_argument(
+        "--chunk_overlap_latent",
+        type=int,
+        default=None,
+        help="Number of overlapping latent frames between AR chunks. Overrides model.config.self_forcing_chunk_overlap.",
+    )
+    parser.add_argument(
+        "--max_ar_chunks",
+        type=int,
+        default=None,
+        help=(
+            "Maximum number of AR chunks to generate. If omitted, uses "
+            "model.config.self_forcing_max_rollout_chunks; 0 means no cap."
+        ),
     )
     parser.add_argument("--use_cuda_graphs", action="store_true", help="Use CUDA Graphs for the inference.")
     parser.add_argument("--hierarchical_cp", action="store_true", help="Use hierarchical CP algorithm (a2a + p2p)")
@@ -717,7 +785,14 @@ def main():
     input_root = Path(args.input_root)
     videos_dir = input_root / "videos"
     hint_keys = vid2world_cli.config.model.config.hint_keys
-    control_folder_name = "world_scenario" if args.dataset == "mads" else hint_keys
+    control_folder_candidates = (
+        ["world_scenario", f"control_input_{hint_keys}", hint_keys] if args.dataset == "mads" else [hint_keys]
+    )
+    control_folder_name = next(
+        (folder_name for folder_name in control_folder_candidates if (input_root / folder_name).exists()),
+        control_folder_candidates[0],
+    )
+    log.info(f"Using control folder: {control_folder_name}")
 
     # Create output directory
     save_root = f"{args.save_root}/{hint_keys}"
@@ -805,6 +880,29 @@ def main():
 
                 th.cuda.synchronize()
                 start_time = time.time()
+                chunk_size = vid2world_cli.model.tokenizer.get_pixel_num_frames(vid2world_cli.model.config.state_t)
+                chunk_overlap = resolve_autoregressive_pixel_overlap(
+                    vid2world_cli.model,
+                    pixel_overlap=args.chunk_overlap,
+                    latent_overlap=args.chunk_overlap_latent,
+                )
+                max_ar_chunks = resolve_autoregressive_max_chunks(vid2world_cli.model, args.max_ar_chunks)
+                control_key = f"control_input_{hint_keys}"
+
+                if rank0:
+                    latent_overlap = (
+                        args.chunk_overlap_latent
+                        if args.chunk_overlap_latent is not None
+                        else getattr(vid2world_cli.model.config, "self_forcing_chunk_overlap", 0)
+                    )
+                    log.info(
+                        "Autoregressive inference settings: "
+                        f"state_t={vid2world_cli.model.config.state_t}, "
+                        f"chunk_size={chunk_size} pixel frames, "
+                        f"chunk_overlap={chunk_overlap} pixel frames, "
+                        f"latent_overlap={latent_overlap}, "
+                        f"max_ar_chunks={max_ar_chunks}"
+                    )
 
                 video, control = vid2world_cli.generate_autoregressive_from_batch(
                     data_batch,
@@ -813,9 +911,11 @@ def main():
                     num_conditional_frames=args.num_conditional_frames,
                     num_steps=args.num_steps,
                     n_views=len(DEFAULT_CAMERA_ORDER),
-                    chunk_size=vid2world_cli.model.tokenizer.get_pixel_num_frames(vid2world_cli.model.config.state_t),
-                    chunk_overlap=args.chunk_overlap,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
                     use_negative_prompt=args.use_negative_prompt,
+                    max_chunks=max_ar_chunks,
+                    control_key=control_key,
                 )
 
                 th.cuda.synchronize()

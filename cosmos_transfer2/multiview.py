@@ -35,7 +35,11 @@ from cosmos_transfer2._src.predict2_multiview.configs.vid2vid.defaults.condition
 from cosmos_transfer2._src.predict2_multiview.datasets.local import LocalMultiViewDataset
 from cosmos_transfer2._src.predict2_multiview.datasets.multiview import AugmentationConfig, collate_fn
 from cosmos_transfer2._src.transfer2.inference.utils import color_message
-from cosmos_transfer2._src.transfer2_multiview.inference.inference import ControlVideo2WorldInference
+from cosmos_transfer2._src.transfer2_multiview.inference.inference import (
+    ControlVideo2WorldInference,
+    resolve_autoregressive_max_chunks,
+    resolve_autoregressive_pixel_overlap,
+)
 from cosmos_transfer2.multiview_config import (
     MULTIVIEW_CAMERA_KEYS,
     MultiviewInferenceArguments,
@@ -204,23 +208,51 @@ class MultiviewInference:
         # Clamp num_chunks in autoregressive mode to what's available. This makes it easy for a user to set a high
         # num_chunks value and let the control length limit the actual number of chunks.
         effective_num_chunks = sample.num_chunks
+        chunk_overlap = sample.chunk_overlap
+        model_max_ar_chunks = 0
         if sample.enable_autoregressive:
+            chunk_overlap = resolve_autoregressive_pixel_overlap(
+                self.pipe.model,
+                pixel_overlap=sample.chunk_overlap,
+                latent_overlap=sample.chunk_overlap_latent,
+            )
+            if chunk_overlap <= 0:
+                chunk_overlap = 1
+            if chunk_overlap >= chunk_size:
+                raise ValueError(f"chunk_overlap={chunk_overlap} must be smaller than chunk_size={chunk_size}")
+
+            model_max_ar_chunks = resolve_autoregressive_max_chunks(self.pipe.model, sample.max_ar_chunks)
+            if model_max_ar_chunks > 0 and effective_num_chunks > model_max_ar_chunks:
+                log.info(
+                    f"Clamping num_chunks={effective_num_chunks} to max_ar_chunks={model_max_ar_chunks} "
+                    "from sample/model config."
+                )
+                effective_num_chunks = model_max_ar_chunks
+
             max_chunks = 1 + (available_control_frames_after_downsample - chunk_size) // (
-                chunk_size - sample.chunk_overlap
+                chunk_size - chunk_overlap
             )
             max_chunks = max(1, max_chunks)  # At least 1 chunk
 
-            if sample.num_chunks > max_chunks:
+            if effective_num_chunks > max_chunks:
                 log.warning(
-                    f"Requested num_chunks={sample.num_chunks} requires more frames than available. "
+                    f"Requested num_chunks={effective_num_chunks} requires more frames than available. "
                     f"Clamping to max_chunks={max_chunks} (available_frames={available_control_frames_after_downsample}, "
-                    f"chunk_size={chunk_size}, overlap={sample.chunk_overlap})"
+                    f"chunk_size={chunk_size}, overlap={chunk_overlap})"
                 )
                 effective_num_chunks = max_chunks
+            log.info(
+                "Autoregressive sample settings: "
+                f"state_t={self.pipe.config.model.config.state_t}, "
+                f"chunk_size={chunk_size}, "
+                f"chunk_overlap={chunk_overlap}, "
+                f"num_chunks={effective_num_chunks}, "
+                f"max_ar_chunks={model_max_ar_chunks}"
+            )
 
         num_video_frames_per_view = chunk_size
         if sample.enable_autoregressive:
-            num_video_frames_per_view += (num_video_frames_per_view - sample.chunk_overlap) * (effective_num_chunks - 1)
+            num_video_frames_per_view += (num_video_frames_per_view - chunk_overlap) * (effective_num_chunks - 1)
 
         camera_keys = sample.active_camera_keys
         primary_caption_view = "front_wide" if "front_wide" in camera_keys else camera_keys[0]
@@ -298,13 +330,14 @@ class MultiviewInference:
                 video, control = self.pipe.generate_autoregressive_from_batch(
                     batch,
                     n_views=len(augmentation_config.camera_keys),
-                    chunk_overlap=sample.chunk_overlap,
+                    chunk_overlap=chunk_overlap,
                     chunk_size=chunk_size,
                     guidance=sample.guidance,
                     seed=sample.seed,
                     num_conditional_frames=num_conditional_frames,
                     num_steps=sample.num_steps,
                     use_negative_prompt=True,
+                    max_chunks=effective_num_chunks,
                 )
             else:
                 log.info(f"------ Generating video ------")
