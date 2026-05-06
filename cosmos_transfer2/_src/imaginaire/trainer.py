@@ -265,11 +265,15 @@ class ImaginaireTrainer:
                         continue
                     # Do the following when an actual optimizer (update) step has been made.
                     iteration += 1
-                    # Save checkpoint.
-                    if iteration % self.config.checkpoint.save_iter == 0:
-                        self.checkpointer.save(model, optimizer, scheduler, grad_scaler, iteration=iteration)
+                    should_save_checkpoint = iteration % self.config.checkpoint.save_iter == 0
                     self.callbacks.on_training_step_end(model, data_batch, output_batch, loss, iteration=iteration)
                     self._maybe_log_gpu_memory(iteration)
+                    # Release per-iteration tensors before DCP builds/writes checkpoint state.
+                    if should_save_checkpoint:
+                        del data_batch, output_batch, loss
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        self.checkpointer.save(model, optimizer, scheduler, grad_scaler, iteration=iteration)
                     # Validation.
                     if self.config.trainer.run_validation and iteration % self.config.trainer.validation_iter == 0:
                         self.validate(model, dataloader_val, iteration=iteration)
