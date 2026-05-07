@@ -1,0 +1,44 @@
+{
+    "name": "multiview_autoregressive",
+    "prompt": "The video captures a urban driving scene viewed from inside a vehicle. The camera, positioned inside the vehicle, provides a first-person perspective as the car moves forward. As the vehicle progresses, the camera passes by parked cars. The street is relatively quiet, with minimal pedestrian activity, and the occasional passing car can be seen in the distance. The overall ambiance is calm and serene. The camera remains steady throughout, capturing the continuous forward motion of the vehicle as it navigates through this urban landscape.",
+    "fps": 15,
+    "enable_autoregressive": true,
+    "num_chunks": 2,
+    "chunk_overlap_latent": 2,
+    "max_ar_chunks": 2,
+    "front_wide":{
+        "input_path": "videos/ftheta_camera_front_wide_120fov/1940137298271334400_003_long.mp4",
+        "control_path": "control_input_hdmap_bbox/ftheta_camera_front_wide_120fov/1940137298271334400_003_long.mp4",
+        "num_conditional_frames_per_view": 1
+    },
+    "cross_left":{
+        "input_path": "videos/ftheta_camera_cross_left_120fov/1940137298271334400_003_long.mp4",
+        "control_path": "control_input_hdmap_bbox/ftheta_camera_cross_left_120fov/1940137298271334400_003_long.mp4",
+        "num_conditional_frames_per_view": 1
+    },
+    "cross_right":{
+        "input_path": "videos/ftheta_camera_cross_right_120fov/1940137298271334400_003_long.mp4",
+        "control_path": "control_input_hdmap_bbox/ftheta_camera_cross_right_120fov/1940137298271334400_003_long.mp4",
+        "num_conditional_frames_per_view": 1
+    },
+    "rear_left":{
+        "input_path": "videos/ftheta_camera_rear_left_70fov/1940137298271334400_003_long.mp4",
+        "control_path": "control_input_hdmap_bbox/ftheta_camera_rear_left_70fov/1940137298271334400_003_long.mp4",
+        "num_conditional_frames_per_view": 1
+    },
+    "rear_right":{
+        "input_path": "videos/ftheta_camera_rear_right_70fov/1940137298271334400_003_long.mp4",
+        "control_path": "control_input_hdmap_bbox/ftheta_camera_rear_right_70fov/1940137298271334400_003_long.mp4",
+        "num_conditional_frames_per_view": 1
+    },
+    "rear":{
+        "input_path": "videos/ftheta_camera_rear_tele_30fov/1940137298271334400_003_long.mp4",
+        "control_path": "control_input_hdmap_bbox/ftheta_camera_rear_tele_30fov/1940137298271334400_003_long.mp4",
+        "num_conditional_frames_per_view": 1
+    },
+    "front_tele":{
+        "input_path": "videos/ftheta_camera_rear_front_30fov/1940137298271334400_003_long.mp4",
+        "control_path": "control_input_hdmap_bbox/ftheta_camera_rear_front_30fov/1940137298271334400_003_long.mp4",
+        "num_conditional_frames_per_view": 1
+    }
+}
