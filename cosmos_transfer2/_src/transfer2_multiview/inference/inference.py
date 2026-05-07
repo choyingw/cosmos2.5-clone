@@ -45,6 +45,9 @@ from megatron.core import parallel_state
 from cosmos_transfer2._src.imaginaire.utils import distributed
 from cosmos_transfer2._src.predict2.utils.model_loader import load_model_from_checkpoint
 
+AR_LATENT_PREFIX_KEY = "ar_latent_prefix"
+AR_LATENT_PREFIX_FRAMES_KEY = "ar_latent_prefix_frames"
+
 
 def set_seeds(seed: int, deterministic: bool = False):
     """
@@ -233,6 +236,24 @@ class ControlVideo2WorldInference:
             where t is the number of frames, v is the number of views, h is the height, and w is the width
             The values are in the range [0, 1]
         """
+        sample = self.generate_latents_from_batch(
+            data_batch,
+            guidance=guidance,
+            seed=seed,
+            num_steps=num_steps,
+            use_negative_prompt=use_negative_prompt,
+        )
+        return ((self.model.decode(sample) + 1.0) / 2.0).clamp(0, 1)
+
+    def generate_latents_from_batch(
+        self,
+        data_batch,
+        guidance: float,
+        seed: int,
+        num_steps: int,
+        use_negative_prompt: bool,
+    ):
+        """Generate latent video tensor from batch."""
         data_batch = to_model_input(data_batch, self.model)
         if self.model.config.text_encoder_config is not None and self.model.config.text_encoder_config.compute_online:
             self.model.inplace_compute_text_embeddings_online(data_batch)
@@ -250,8 +271,7 @@ class ControlVideo2WorldInference:
             num_steps=num_steps,
             is_negative_prompt=use_negative_prompt,
         )
-        # (bsz = 1, c = 3, t = n_camera * t, h, w)
-        return ((self.model.decode(sample) + 1.0) / 2.0).clamp(0, 1)
+        return sample
 
     def generate_autoregressive_from_batch(
         self,
@@ -325,9 +345,34 @@ class ControlVideo2WorldInference:
                 f"effective_step={effective_chunk_size}, max_chunks={max_chunks}"
             )
 
+        tokenizer = self.model.tokenizer
+        if num_chunks == 1:
+            if self.rank0:
+                logger.info("num_chunks=1: using direct single-window generation path")
+            direct_batch = dict(full_batch)
+            direct_batch["num_conditional_frames"] = _num_conditional_frames_for_batch(
+                0, tokenizer, num_conditional_frames, chunk_overlap
+            )
+            video = self.generate_from_batch(
+                direct_batch,
+                guidance=guidance,
+                seed=int(seed),
+                num_steps=num_steps,
+                use_negative_prompt=use_negative_prompt,
+            )[0]
+
+            if video.shape[1] % n_views != 0:
+                raise ValueError(f"Generated video frames ({video.shape[1]}) not divisible by n_views={n_views}.")
+            generated_frames_per_view = video.shape[1] // n_views
+            final_control = einops.rearrange(full_control[0].float() / 255.0, "C (V T) H W -> V C T H W", V=n_views)[
+                :, :, :generated_frames_per_view
+            ]
+            final_control = einops.rearrange(final_control, "V C T H W -> C (V T) H W")
+            return video.cpu(), final_control.cpu()
+
         # Generate first chunk using original input videos
         current_input_video = full_batch["video"].clone()
-        tokenizer = self.model.tokenizer
+        prev_generated_latent = None
 
         for chunk_idx in range(num_chunks):
             # Calculate frame range for this chunk
@@ -345,18 +390,39 @@ class ControlVideo2WorldInference:
                 full_batch, current_input_video, full_control, start_frame, end_frame, n_views, control_key
             )
 
-            chunk_batch["num_conditional_frames"] = _num_conditional_frames_for_batch(
+            latent_conditional_frames = _num_conditional_frames_for_batch(
                 chunk_idx, tokenizer, num_conditional_frames, chunk_overlap
             )
+            chunk_batch["num_conditional_frames"] = latent_conditional_frames
+
+            if chunk_idx > 0 and prev_generated_latent is not None:
+                latent_overlap = int(latent_conditional_frames)
+                if latent_overlap > 0:
+                    prev_latent_B_C_V_T_H_W = einops.rearrange(
+                        prev_generated_latent, "B C (V T) H W -> B C V T H W", V=n_views
+                    )
+                    latent_prefix = prev_latent_B_C_V_T_H_W[:, :, :, -latent_overlap:].contiguous()
+                    latent_prefix = einops.rearrange(latent_prefix, "B C V T H W -> B C (V T) H W")
+                    chunk_batch[AR_LATENT_PREFIX_KEY] = latent_prefix.detach()
+                    chunk_batch[AR_LATENT_PREFIX_FRAMES_KEY] = torch.tensor(
+                        [latent_overlap], dtype=torch.int64, device=latent_prefix.device
+                    )
+                    if self.rank0:
+                        logger.info(
+                            f"Using latent AR cache for chunk {chunk_idx + 1}: "
+                            f"{latent_overlap} latent frames per view"
+                        )
 
             # Generate chunk
-            chunk_video = self.generate_from_batch(
+            chunk_latent = self.generate_latents_from_batch(
                 chunk_batch,
                 guidance=guidance,
                 seed=int(seed) + chunk_idx,
                 num_steps=num_steps,
                 use_negative_prompt=use_negative_prompt,
-            )[0]  # C_T_H_W
+            )
+            prev_generated_latent = chunk_latent.detach()
+            chunk_video = ((self.model.decode(chunk_latent) + 1.0) / 2.0).clamp(0, 1)[0]  # C_T_H_W
             chunk_video = einops.rearrange(chunk_video, "C (V T) H W -> V C T H W", V=n_views)
             # Store generated chunk (remove overlap from previous chunks)
             if chunk_idx == 0:
@@ -448,7 +514,7 @@ class ControlVideo2WorldInference:
             ]
         ).to(original_batch["num_video_frames_per_view"])
         chunk_batch["view_indices"] = view_indices_chunk.clone()
-        chunk_batch["fps"] = torch.tensor([30.0]).to(original_batch["fps"])
+        chunk_batch["fps"] = original_batch["fps"].clone()
 
         return chunk_batch
 

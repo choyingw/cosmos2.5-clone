@@ -46,6 +46,8 @@ from cosmos_transfer2._src.transfer2_multiview.configs.vid2vid_transfer.defaults
 )
 
 CONTROL_WEIGHT_KEY = "control_weight"
+AR_LATENT_PREFIX_KEY = "ar_latent_prefix"
+AR_LATENT_PREFIX_FRAMES_KEY = "ar_latent_prefix_frames"
 
 
 @attrs.define(slots=False)
@@ -353,6 +355,43 @@ class MultiviewControlVideo2WorldModelRectifiedFlow(ControlVideo2WorldModelRecti
         )
         return raw_state, latent_state, condition
 
+    def _inject_ar_latent_prefix(self, x0: Tensor, data_batch: dict[str, torch.Tensor]) -> Tensor:
+        latent_prefix = data_batch.get(AR_LATENT_PREFIX_KEY)
+        if latent_prefix is None:
+            return x0
+
+        latent_prefix_frames = data_batch.get(AR_LATENT_PREFIX_FRAMES_KEY)
+        if latent_prefix_frames is None:
+            raise ValueError(f"{AR_LATENT_PREFIX_FRAMES_KEY} must be provided with {AR_LATENT_PREFIX_KEY}")
+        if isinstance(latent_prefix_frames, torch.Tensor):
+            latent_prefix_frames = int(latent_prefix_frames.flatten()[0].item())
+        else:
+            latent_prefix_frames = int(latent_prefix_frames)
+        if latent_prefix_frames <= 0:
+            return x0
+
+        n_views = latent_prefix.shape[2] // latent_prefix_frames
+        if n_views <= 0 or latent_prefix.shape[2] % n_views != 0 or x0.shape[2] % n_views != 0:
+            raise ValueError(
+                f"Invalid AR latent prefix shape: {tuple(latent_prefix.shape)=}, {latent_prefix_frames=}, "
+                f"{tuple(x0.shape)=}"
+            )
+
+        x0_t = x0.shape[2] // n_views
+        prefix_t = latent_prefix.shape[2] // n_views
+        copy_t = min(latent_prefix_frames, prefix_t, x0_t)
+        if copy_t <= 0:
+            return x0
+
+        x0_B_C_V_T_H_W = rearrange(x0, "B C (V T) H W -> B C V T H W", V=n_views).clone()
+        prefix_B_C_V_T_H_W = rearrange(
+            latent_prefix.to(device=x0.device, dtype=x0.dtype),
+            "B C (V T) H W -> B C V T H W",
+            V=n_views,
+        )
+        x0_B_C_V_T_H_W[:, :, :, :copy_t] = prefix_B_C_V_T_H_W[:, :, :, :copy_t]
+        return rearrange(x0_B_C_V_T_H_W, "B C V T H W -> B C (V T) H W")
+
     def get_velocity_fn_from_batch(
         self,
         data_batch: Dict,
@@ -393,6 +432,7 @@ class MultiviewControlVideo2WorldModelRectifiedFlow(ControlVideo2WorldModelRecti
         condition = condition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
         uncondition = uncondition.edit_data_type(DataType.IMAGE if is_image_batch else DataType.VIDEO)
         _, x0, data_batch_condition = self.get_data_and_condition(data_batch_with_latent_view_indices)
+        x0 = self._inject_ar_latent_prefix(x0, data_batch_with_latent_view_indices)
         # override condition with inference mode; num_conditional_frames used Here!
         condition = condition.set_video_condition(
             state_t=self.config.state_t,
