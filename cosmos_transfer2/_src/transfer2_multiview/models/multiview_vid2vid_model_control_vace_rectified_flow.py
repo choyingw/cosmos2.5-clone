@@ -219,10 +219,10 @@ class MultiviewControlVideo2WorldModelRectifiedFlow(ControlVideo2WorldModelRecti
         latent_t_per_view = self.tokenizer.get_latent_num_frames(num_video_frames_per_view)
         latent_view_indices_B_V_T = view_indices_B_V_T[:, :, 0:latent_t_per_view]
         latent_view_indices_B_T = rearrange(latent_view_indices_B_V_T, "B V T -> B (V T)")
-        # data_batch_with_latent_view_indices = data_batch.copy()
-        data_batch["latent_view_indices_B_T"] = latent_view_indices_B_T
+        data_batch_with_latent_view_indices = data_batch.copy()
+        data_batch_with_latent_view_indices["latent_view_indices_B_T"] = latent_view_indices_B_T
 
-        return data_batch
+        return data_batch_with_latent_view_indices
 
     def _normalize_video_databatch_inplace(self, data_batch: dict[str, Tensor], input_key: str = None) -> None:
         input_key = self.input_data_key if input_key is None else input_key
@@ -490,7 +490,7 @@ class MultiviewControlVideo2WorldModelRectifiedFlow(ControlVideo2WorldModelRecti
             cond_v = self.denoise(noise, noise_x, timestep, condition)
             uncond_v = self.denoise(noise, noise_x, timestep, uncondition)
 
-            velocity_pred = cond_v + guidance * (cond_v - uncond_v)
+            velocity_pred = uncond_v + guidance * (cond_v - uncond_v)
             return velocity_pred
 
         return velocity_fn

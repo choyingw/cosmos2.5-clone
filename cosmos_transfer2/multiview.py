@@ -192,12 +192,6 @@ class MultiviewInference:
 
         # Calculate number of video frames to load
         assert self.pipe.config.model.config.state_t >= 1
-        if sample.enable_autoregressive and self.pipe.config.model.config.state_t == 4 and self.pipe.context_parallel_size > 4:
-            raise ValueError(
-                "Autoregressive inference with state_t=4 does not support context_parallel_size > 4 at 720p. "
-                "CP=8 leaves a factor of 2 after temporal splitting and then tries to split the width dimension, "
-                "which is disabled due to quality issues. Use --context-parallel-size 4 for this AR model."
-            )
         chunk_size = self.pipe.model.tokenizer.get_pixel_num_frames(  # pyrefly: ignore # missing-attribute
             self.pipe.config.model.config.state_t
         )
@@ -256,8 +250,22 @@ class MultiviewInference:
                 f"max_ar_chunks={model_max_ar_chunks}"
             )
 
+        use_autoregressive_generation = sample.enable_autoregressive and effective_num_chunks > 1
+        if sample.enable_autoregressive and not use_autoregressive_generation:
+            log.info("enable_autoregressive=True but num_chunks=1; using normal single-window inference path.")
+        if (
+            use_autoregressive_generation
+            and self.pipe.config.model.config.state_t == 4
+            and self.pipe.context_parallel_size > 4
+        ):
+            raise ValueError(
+                "Autoregressive inference with state_t=4 does not support context_parallel_size > 4 at 720p. "
+                "CP=8 leaves a factor of 2 after temporal splitting and then tries to split the width dimension, "
+                "which is disabled due to quality issues. Use --context-parallel-size 4 for this AR model."
+            )
+
         num_video_frames_per_view = chunk_size
-        if sample.enable_autoregressive:
+        if use_autoregressive_generation:
             num_video_frames_per_view += (num_video_frames_per_view - chunk_overlap) * (effective_num_chunks - 1)
 
         camera_keys = sample.active_camera_keys
@@ -273,7 +281,7 @@ class MultiviewInference:
             log.warning(f"Reducing the number of views to 1 for smoke test. Generated quality will be sub-optimal.")
             augmentation_config.camera_keys = augmentation_config.camera_keys[:1]
         log.info(f"Generating local multiview dataset with following config: {augmentation_config}")
-        if sample.enable_autoregressive:
+        if use_autoregressive_generation:
             self.pipe.config.model.config.condition_locations = ConditionLocationList(
                 [ConditionLocation.FIRST_RANDOM_N]
             )
@@ -318,7 +326,7 @@ class MultiviewInference:
 
         for _, batch in enumerate(dataloader):
             batch["control_weight"] = sample.control_weight
-            if sample.enable_autoregressive:
+            if use_autoregressive_generation:
                 num_conditional_frames_per_view = [
                     getattr(sample, k).num_conditional_frames_per_view for k in augmentation_config.camera_keys
                 ]
@@ -331,7 +339,7 @@ class MultiviewInference:
             else:
                 num_conditional_frames = sample.num_conditional_frames
 
-            if sample.enable_autoregressive:
+            if use_autoregressive_generation:
                 log.info(f"------ Generating video with autoregressive mode ------")
                 video, control = self.pipe.generate_autoregressive_from_batch(
                     batch,
@@ -371,7 +379,7 @@ class MultiviewInference:
                 control = None
 
             if self.rank0:
-                if not sample.enable_autoregressive:
+                if not use_autoregressive_generation:
                     video = video[0]
 
                 # Run video guardrail on the normalized video
