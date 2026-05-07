@@ -99,7 +99,9 @@ class MultiviewControlVideo2WorldModelRectifiedFlow(ControlVideo2WorldModelRecti
     @torch.no_grad()
     def encode(self, state: torch.Tensor) -> torch.Tensor:
         n_views = state.shape[2] // self.tokenizer.get_pixel_num_frames(self.state_t)
-        if n_views > 1:
+        cp_group = parallel_state.get_context_parallel_group()
+        cp_size = 1 if cp_group is None else len(get_process_group_ranks(cp_group))
+        if n_views > 1 and n_views <= cp_size:
             return self.encode_cp(state)
         state = rearrange(state, "B C (V T) H W -> (B V) C T H W", V=n_views)
         encoded_state = super().encode(state)
@@ -109,7 +111,9 @@ class MultiviewControlVideo2WorldModelRectifiedFlow(ControlVideo2WorldModelRecti
     @torch.no_grad()
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
         n_views = latent.shape[2] // self.state_t
-        if n_views > 1:
+        cp_group = parallel_state.get_context_parallel_group()
+        cp_size = 1 if cp_group is None else len(get_process_group_ranks(cp_group))
+        if n_views > 1 and n_views <= cp_size:
             return self.decode_cp(latent)
         latent = rearrange(latent, "B C (V T) H W -> (B V) C T H W", V=n_views)
         decoded_state = super().decode(latent)
@@ -141,6 +145,10 @@ class MultiviewControlVideo2WorldModelRectifiedFlow(ControlVideo2WorldModelRecti
         cp_size = len(get_process_group_ranks(parallel_state.get_context_parallel_group()))
         cp_group = parallel_state.get_context_parallel_group()
         n_views = latent.shape[2] // self.state_t
+        if n_views > cp_size:
+            raise ValueError(
+                f"n_views must be less than or equal to cp_size for CP decode, got n_views={n_views} and cp_size={cp_size}"
+            )
         latent_V_B_C_T_H_W = rearrange(latent, "B C (V T) H W -> V B C T H W", V=n_views)
         latent_input = torch.zeros((cp_size, *latent_V_B_C_T_H_W.shape[1:]), **self.tensor_kwargs)
         latent_input[0:n_views] = latent_V_B_C_T_H_W
