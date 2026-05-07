@@ -192,6 +192,12 @@ class MultiviewInference:
 
         # Calculate number of video frames to load
         assert self.pipe.config.model.config.state_t >= 1
+        if sample.enable_autoregressive and self.pipe.config.model.config.state_t == 4 and self.pipe.context_parallel_size > 4:
+            raise ValueError(
+                "Autoregressive inference with state_t=4 does not support context_parallel_size > 4 at 720p. "
+                "CP=8 leaves a factor of 2 after temporal splitting and then tries to split the width dimension, "
+                "which is disabled due to quality issues. Use --context-parallel-size 4 for this AR model."
+            )
         chunk_size = self.pipe.model.tokenizer.get_pixel_num_frames(  # pyrefly: ignore # missing-attribute
             self.pipe.config.model.config.state_t
         )

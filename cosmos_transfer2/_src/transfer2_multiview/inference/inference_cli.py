@@ -186,7 +186,7 @@ EXP=transfer2_auto_multiview_post_train_example_self_forcing
 PYTHONPATH=. torchrun --nproc_per_node=8 --master_port=12341 -m cosmos_transfer2._src.transfer2_multiview.inference.inference_cli \
     --experiment ${EXP} \
     --ckpt_path ./outputs/cosmos_transfer_v2p5/auto_multiview/2b_cosmos_multiview_post_train_example_self_forcing/checkpoints/iter_000000002 \
-    --context_parallel_size 8 \
+    --context_parallel_size 4 \
     --input_root sample_sf \
     --num_conditional_frames 1 \
     --guidance 3.0 \

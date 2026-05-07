@@ -1,7 +1,7 @@
 {
     "name": "multiview_autoregressive",
     "prompt": "The video captures a urban driving scene viewed from inside a vehicle. The camera, positioned inside the vehicle, provides a first-person perspective as the car moves forward. As the vehicle progresses, the camera passes by parked cars. The street is relatively quiet, with minimal pedestrian activity, and the occasional passing car can be seen in the distance. The overall ambiance is calm and serene. The camera remains steady throughout, capturing the continuous forward motion of the vehicle as it navigates through this urban landscape.",
-    "fps": 15,
+    "fps": 10,
     "enable_autoregressive": true,
     "num_chunks": 2,
     "chunk_overlap_latent": 2,
