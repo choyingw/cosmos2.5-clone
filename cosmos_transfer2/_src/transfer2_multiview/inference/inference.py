@@ -236,12 +236,22 @@ class ControlVideo2WorldInference:
             where t is the number of frames, v is the number of views, h is the height, and w is the width
             The values are in the range [0, 1]
         """
-        sample = self.generate_latents_from_batch(
+        data_batch = to_model_input(data_batch, self.model)
+        if self.model.config.text_encoder_config is not None and self.model.config.text_encoder_config.compute_online:
+            self.model.inplace_compute_text_embeddings_online(data_batch)
+
+        raw_data, x0, condition = self.model.get_data_and_condition(data_batch)
+
+        self.model.eval()
+        sample = self.model.generate_samples_from_batch(
             data_batch,
             guidance=guidance,
-            seed=seed,
+            # make sure no mismatch and also works for cp
+            state_shape=x0.shape[1:],
+            n_sample=x0.shape[0],
+            seed=seed,  # Fixed seed for reproducibility
             num_steps=num_steps,
-            use_negative_prompt=use_negative_prompt,
+            is_negative_prompt=use_negative_prompt,
         )
         return ((self.model.decode(sample) + 1.0) / 2.0).clamp(0, 1)
 
@@ -267,7 +277,7 @@ class ControlVideo2WorldInference:
             # make sure no mismatch and also works for cp
             state_shape=x0.shape[1:],
             n_sample=x0.shape[0],
-            seed=seed,  # Fixed seed for reproducibility
+            seed=seed,
             num_steps=num_steps,
             is_negative_prompt=use_negative_prompt,
         )
