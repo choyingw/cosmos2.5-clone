@@ -198,11 +198,17 @@ class MultiViewCondition(Video2WorldCondition):
         assert len(condition_locations) > 0, "condition_locations must be provided."
         assert state_t is not None, "state_t must be provided."
         assert T > 1, "Image batches are not supported."
+        sample_n_views_from_state_t = T // state_t if T % state_t == 0 else None
         if kwargs["view_indices_B_T"] is not None:
-            sample_n_views = int(torch.unique(kwargs["view_indices_B_T"][0]).numel())
+            sample_n_views_from_indices = int(torch.unique(kwargs["view_indices_B_T"][0]).numel())
+            sample_n_views = (
+                sample_n_views_from_state_t
+                if sample_n_views_from_state_t == sample_n_views_from_indices
+                else sample_n_views_from_indices
+            )
         else:
             assert T % state_t == 0, f"T must be a multiple of state_t. Got T={T} and state_t={state_t}."
-            sample_n_views = T // state_t
+            sample_n_views = sample_n_views_from_state_t
         assert T % sample_n_views == 0, (
             f"T must be divisible by sample_n_views. Got T={T} and sample_n_views={sample_n_views}."
         )
@@ -384,8 +390,10 @@ class MultiViewCondition(Video2WorldCondition):
 
         kwargs = new_condition.to_dict(skip_underscore=False)
         _, _, T, _, _ = gt_frames_B_C_T_H_W.shape
+        n_views_from_state_t = T // self.state_t if T % self.state_t == 0 else None
         if view_indices_B_T is not None:
-            n_views = int(torch.unique(view_indices_B_T[0]).numel())
+            n_views_from_indices = int(torch.unique(view_indices_B_T[0]).numel())
+            n_views = n_views_from_state_t if n_views_from_state_t == n_views_from_indices else n_views_from_indices
         else:
             n_views = T // self.state_t
             assert T % self.state_t == 0, f"T must be a multiple of state_t. Got T={T} and state_t={self.state_t}."

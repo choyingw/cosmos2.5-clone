@@ -181,9 +181,13 @@ class MultiviewControlVideo2WorldModelRectifiedFlow(ControlVideo2WorldModelRecti
         epsilon_B_C_T_H_W: torch.Tensor,
         sigma_B_T: torch.Tensor,
     ):
+        n_views_from_state_t = (
+            x0_B_C_T_H_W.shape[2] // self.state_t if x0_B_C_T_H_W.shape[2] % self.state_t == 0 else None
+        )
         view_indices_B_T = getattr(condition, "view_indices_B_T", None)
         if isinstance(view_indices_B_T, torch.Tensor) and view_indices_B_T.ndim == 2:
-            n_views = int(torch.unique(view_indices_B_T[0]).numel())
+            n_views_from_indices = int(torch.unique(view_indices_B_T[0]).numel())
+            n_views = n_views_from_state_t if n_views_from_state_t == n_views_from_indices else n_views_from_indices
         else:
             n_views = x0_B_C_T_H_W.shape[2] // self.state_t
         x0_B_C_T_H_W = rearrange(x0_B_C_T_H_W, "B C (V T) H W -> (B V) C T H W", V=n_views).contiguous()

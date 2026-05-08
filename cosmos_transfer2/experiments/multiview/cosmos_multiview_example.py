@@ -114,8 +114,8 @@ transfer2_auto_multiview_post_train_example_self_forcing = dict(
     model=dict(
         config=dict(
             base_load_from=None,
-            # 13 pixel frames per AR chunk for Wan tokenizer.
-            state_t=4,
+            # 29 pixel frames per chunk for Wan tokenizer.
+            state_t=8,
             self_forcing_enabled=True,
             self_forcing_prob=0.2,
             self_forcing_warmup_iter=100,
@@ -126,7 +126,7 @@ transfer2_auto_multiview_post_train_example_self_forcing = dict(
             self_forcing_detach_rollout=True,
             self_forcing_max_rollout_chunks=2,
             net=dict(
-                state_t=4,
+                state_t=8,
             ),
         ),
     ),
@@ -172,8 +172,7 @@ transfer2_auto_multiview_post_train_example_self_forcing = dict(
         dataset=dict(
             dataset_dir="sample_sf",
             augmentation_config=dict(
-                # 29 pixel frames gives 8 latent frames per view; with state_t=4
-                # and overlap=2, AR has up to 3 chunks, capped to 2 above.
+                # 29 pixel frames gives 8 latent frames per view, matching state_t=8.
                 num_video_frames=29,
                 sample_random_consecutive_frames_from_full_video=True,
                 single_caption_camera_name="camera_front_wide_120fov",
@@ -182,9 +181,8 @@ transfer2_auto_multiview_post_train_example_self_forcing = dict(
         ),
     ),
     model_parallel=dict(
-        # state_t=4 can be split temporally by CP=4. CP=8 would require an
-        # additional spatial split, which can fall through to unsupported width splitting at 720p.
-        context_parallel_size=min(4, int(os.environ.get("WORLD_SIZE", "1"))),
+        # state_t=8 can be split temporally by CP=8 at 720p.
+        context_parallel_size=min(8, int(os.environ.get("WORLD_SIZE", "1"))),
     ),
 )
 
